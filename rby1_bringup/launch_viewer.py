@@ -1,7 +1,10 @@
+import pathlib
+
 import mujoco
 import mujoco.viewer
 
-MODEL = "/home/mk/dev_ws/vla/pi0_TO_ws/src/rby1_description/models/rby1a/mujoco/model.xml"
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+MODEL = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml")
 
 model = mujoco.MjModel.from_xml_path(MODEL)
 data = mujoco.MjData(model)
