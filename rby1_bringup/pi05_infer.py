@@ -3,19 +3,35 @@
 Loads chosen pi0.5 checkpoint, feeds ZED-left image + right-arm proprio,
 integrates predicted actions into position ctrl on RBY1's right arm + gripper.
 
-Usage:
-  # DROID variant (default) — 7 joint vel + 1 gripper actions
-  JAX_PLATFORMS=cpu python pi05_infer.py --model droid
+Two ways to run:
 
-  # LIBERO variant — 6 EE delta + 1 gripper (mapped naively to joints for pipeline test)
-  JAX_PLATFORMS=cpu python pi05_infer.py --model libero
+1. All-local (on a machine with JAX + the openpi package + a GPU to host
+   the model — e.g. running directly on the GPU server, headless). Uses
+   whatever JAX backend is available (GPU by default if present; pass
+   JAX_PLATFORMS=cpu yourself to force CPU). On this container's (virtualized,
+   quota-limited) GPU, JAX's default memory preallocation + CUDA graph capture
+   are unstable (OOM-retry storms, then `CUDA_ERROR_INVALID_VALUE` on the 2nd+
+   inference call) — the env vars below route around it; harmless on a normal GPU:
+     XLA_FLAGS="--xla_gpu_enable_command_buffer=" XLA_PYTHON_CLIENT_PREALLOCATE=false \
+         python pi05_infer.py --model droid
+     python pi05_infer.py --model libero
+     python pi05_infer.py --model base   # base ckpt, DROID transform
+     python pi05_infer.py --model droid --headless \
+         --max-steps 60 --record /tmp/rby1_pi05_droid.mp4
 
-  # base model (Fine-Tuning checkpoint) — reuses DROID transform, norm stats may be off
-  JAX_PLATFORMS=cpu python pi05_infer.py --model base
-
-  # Headless with recording
-  JAX_PLATFORMS=cpu python pi05_infer.py --model droid --headless \
-      --max-steps 60 --record /tmp/rby1_pi05_droid.mp4
+2. Split mode — MuJoCo (sim + interactive viewer) on your local PC, model
+   inference on a remote GPU server. On the server, start the policy once
+   (runs on GPU automatically if JAX sees one; add JAX_PLATFORMS=cpu to force CPU;
+   same XLA env vars as above needed on this container's virtualized GPU):
+     XLA_FLAGS="--xla_gpu_enable_command_buffer=" XLA_PYTHON_CLIENT_PREALLOCATE=false \
+         python scripts/serve_policy.py --env DROID --port 8000        # droid/libero via --env
+     XLA_FLAGS="--xla_gpu_enable_command_buffer=" XLA_PYTHON_CLIENT_PREALLOCATE=false \
+         python scripts/serve_policy.py --port 8000 policy:checkpoint \
+         --policy.config pi05_droid \
+         --policy.dir gs://openpi-assets/checkpoints/pi05_base          # for "base"
+   Then on the local PC (only needs mujoco, pillow, numpy, openpi_client —
+   no jax/openpi required):
+     python pi05_infer.py --model droid --remote <server-ip>:8000
 
 Notes on interpretation
 -----------------------
@@ -26,20 +42,22 @@ Notes on interpretation
 """
 import argparse
 import os
+import pathlib
+import sys
 import time
 import numpy as np
 
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+if "--headless" in sys.argv and "MUJOCO_GL" not in os.environ:
+    # No GPU EGL ICD in a plain container -> force CPU offscreen rendering.
+    # Left unset for the interactive (non-headless) path so a real display / GLFW window still works.
+    os.environ["MUJOCO_GL"] = "osmesa"
 
 import mujoco
 import mujoco.viewer
 from PIL import Image
 
-from openpi.training import config as _config
-from openpi.policies import policy_config as _policy_config
-from openpi.shared import download
-
-MODEL_XML  = "/home/mk/dev_ws/vla/pi0_TO_ws/src/rby1_description/models/rby1a/mujoco/model.xml"
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+MODEL_XML = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml")
 
 MODELS = {
     "droid": {
@@ -99,6 +117,33 @@ def build_obs(obs_format, base_img, wrist_img, joint_pos, grip_norm, prompt):
     raise ValueError(f"unknown obs_format: {obs_format}")
 
 
+def load_local_policy(mcfg):
+    """Load the policy in-process. Requires jax + the openpi package."""
+    import jax
+
+    from openpi.policies import policy_config as _policy_config
+    from openpi.shared import download
+    from openpi.training import config as _config
+
+    print(f"JAX devices: {jax.devices()}")
+    t0 = time.time()
+    cfg = _config.get_config(mcfg["config"])
+    ckpt_dir = download.maybe_download(mcfg["checkpoint"])
+    policy = _policy_config.create_trained_policy(cfg, ckpt_dir)
+    print(f"Policy loaded in {time.time()-t0:.1f}s")
+    return policy
+
+
+def load_remote_policy(remote):
+    """Connect to a `scripts/serve_policy.py` websocket server. Only needs openpi_client."""
+    from openpi_client import websocket_client_policy as _websocket_client_policy
+
+    host, _, port = remote.partition(":")
+    policy = _websocket_client_policy.WebsocketClientPolicy(host=host, port=int(port) if port else None)
+    print(f"Connected to remote policy server: {policy.get_server_metadata()}")
+    return policy
+
+
 def apply_action(action_format, action, d, right_qidx, right_aid, grip_aid):
     """Set d.ctrl in-place based on model action."""
     dt = 1.0 / CTRL_HZ
@@ -128,16 +173,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=list(MODELS.keys()), default="droid",
                     help="which pi0.5 variant to load")
-    ap.add_argument("--prompt", default="pick up the red block and put it in the brown box")
+    ap.add_argument("--prompt", default="pick up the blue block and put it in the brown box")
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--record", default=None, help="path to .mp4 for third-person recording")
+    ap.add_argument("--remote", default=None,
+                     help="host:port of a running scripts/serve_policy.py server; if set, "
+                          "skips local model load and streams obs/actions over websocket instead")
     args = ap.parse_args()
 
     mcfg = MODELS[args.model]
     print(f"=== Model: {args.model} ===")
-    print(f"  config     : {mcfg['config']}")
-    print(f"  checkpoint : {mcfg['checkpoint']}")
+    if args.remote:
+        print(f"  remote     : {args.remote}  (server must be serving obs_format={mcfg['obs_format']!r})")
+    else:
+        print(f"  config     : {mcfg['config']}")
+        print(f"  checkpoint : {mcfg['checkpoint']}")
     print(f"  obs_format : {mcfg['obs_format']}")
     print(f"  act_format : {mcfg['action_format']}")
 
@@ -159,13 +210,7 @@ def main():
     renderer_pol = mujoco.Renderer(m, height=480, width=640)
     renderer_rec = mujoco.Renderer(m, height=480, width=640)
 
-    import jax
-    print(f"JAX devices: {jax.devices()}")
-    t0 = time.time()
-    cfg = _config.get_config(mcfg["config"])
-    ckpt_dir = download.maybe_download(mcfg["checkpoint"])
-    policy = _policy_config.create_trained_policy(cfg, ckpt_dir)
-    print(f"Policy loaded in {time.time()-t0:.1f}s")
+    policy = load_remote_policy(args.remote) if args.remote else load_local_policy(mcfg)
     print(f"Prompt: {args.prompt!r}")
 
     steps_per_action = max(1, int(round(1.0 / (CTRL_HZ * m.opt.timestep))))
