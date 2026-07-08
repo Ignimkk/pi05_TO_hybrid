@@ -4,6 +4,7 @@ Controls:
   - Main viewer: drag mocap targets, use standard mujoco.viewer controls
   - Close any window to quit
 """
+import pathlib
 import time
 import numpy as np
 import mujoco
@@ -12,7 +13,8 @@ from PIL import Image
 import tkinter as tk
 from PIL import ImageTk
 
-MODEL = "/home/mk/dev_ws/vla/pi0_TO_ws/src/rby1_description/models/rby1a/mujoco/model.xml"
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+MODEL = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml")
 CAM_W, CAM_H = 640, 480
 CAM_HZ = 30
 
