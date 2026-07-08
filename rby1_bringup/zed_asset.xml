@@ -1,0 +1,5 @@
+<mujocoinclude>
+  <mesh name="zed2i_mesh" file="meshes/zed2i.stl"/>
+  <mesh name="d435i_bracket_mesh" file="meshes/D435i_BRACKET.STL"/>
+  <mesh name="d435_visual_mesh" file="meshes/d435_visual.stl"/>
+</mujocoinclude>

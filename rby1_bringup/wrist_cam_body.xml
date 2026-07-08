@@ -1,0 +1,17 @@
+<mujocoinclude>
+  <body name="wrist_bracket_r" pos="0 0 -0.1548" quat="0.5 -0.5 -0.5 -0.5">
+    <geom name="wrist_bracket_r_geom" type="mesh" mesh="d435i_bracket_mesh"
+          class="visual" rgba="0.2 0.2 0.2 1"/>
+
+    <!-- D435i camera body: camera element offset (pos=0,0,0.02; quat=-90 around Z)
+         has been baked into this body's pose so mesh direction aligns with view. -->
+    <body name="d435i_cam_r" pos="0.02 0 0.085" quat="0.5 0.5 0.5 0.5">
+      <!-- D435i real dims: 90mm(W) x 25mm(D) x 25mm(H).
+           Half-extents in this body frame: (0.014, 0.013, 0.045) matches the mesh bbox. -->
+      <geom name="d435i_cam_r_geom" type="box" size="0.045 0.014 0.013 "
+            pos="0 -0.013 -0.02"
+            rgba="0.1 0.1 0.1 1" contype="0" conaffinity="0"/>
+      <camera name="wrist_cam_r" pos="0 0 0" fovy="90"/>
+    </body>
+  </body>
+</mujocoinclude>

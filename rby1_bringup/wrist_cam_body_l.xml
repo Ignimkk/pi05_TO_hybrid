@@ -1,0 +1,13 @@
+<mujocoinclude>
+  <body name="wrist_bracket_l" pos="0 0 -0.1548" quat="0.5 -0.5 -0.5 -0.5">
+    <geom name="wrist_bracket_l_geom" type="mesh" mesh="d435i_bracket_mesh"
+          class="visual" rgba="0.2 0.2 0.2 1"/>
+
+    <body name="d435i_cam_l" pos="0.02 0 0.085" quat="0.5 0.5 0.5 0.5">
+      <geom name="d435i_cam_l_geom" type="box" size="0.045 0.014 0.013 "
+            pos="0 -0.013 -0.02"
+            rgba="0.1 0.1 0.1 1" contype="0" conaffinity="0"/>
+      <camera name="wrist_cam_l" pos="0 0 0" fovy="90"/>
+    </body>
+  </body>
+</mujocoinclude>

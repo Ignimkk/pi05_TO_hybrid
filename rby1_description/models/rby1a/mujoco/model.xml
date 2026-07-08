@@ -1,0 +1,74 @@
+<mujoco model="rby1">
+  <option timestep="0.002" solver="CG" iterations="30" tolerance="1e-6" />
+  <size nuserdata="144" />
+
+  <default>
+    <!-- <position ctrlrange="-3000000 3000000" ctrllimited="true" /> -->
+    <position kp="500" dampratio="1" inheritrange="1"/>
+    <default class="stiff"><position kp="6000" dampratio="1" inheritrange="1"/></default>
+    <default class="med">  <position kp="2000" dampratio="1" inheritrange="1"/></default>
+    <default class="visual">
+      <geom group="2" type="mesh" contype="0" conaffinity="0" />
+    </default>
+    <default class="collision">
+      <geom group="3" type="mesh" contype="1" conaffinity="0" />
+    </default>
+    <default class="in-model-collision">
+      <geom group="2" contype="0" conaffinity="0" rgba="0.3 0 0 0.0" />
+    </default>
+  </default>
+  
+  <include file="./rby1.xml" />
+
+  <worldbody>
+  
+
+    <body name="left_ee_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="1"/>
+    </body>
+    <body name="right_ee_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="1"/>
+    </body>
+    <include file="../../../../rby1_bringup/scene_blocks.xml"/>
+  </worldbody>
+
+  <keyframe>
+    <key name='teleop' qpos='0 0 0 0 0 0 0 0 0 0 0 -0.3 -0.3 -0.0 -1.95 -0.3 1.5 -1.57 0 0 -0.3 0.3 -0.0 -1.95 0.3 1.5 -1.57 0 0 0 0.7  0.45 0.00 0.87 1 0 0 0  0.55 0.30 0.87 1 0 0 0  0.75 0.30 0.87 1 0 0 0'/>
+  </keyframe>
+
+  <actuator>
+    <position name="left_wheel_act" joint="left_wheel" />
+    <position name="right_wheel_act" joint="right_wheel" />
+
+    <position class="med"   name="link1_act" joint="torso_0" />
+    <position class="stiff" name="link2_act" joint="torso_1" />
+    <position class="stiff" name="link3_act" joint="torso_2" />
+    <position class="stiff" name="link4_act" joint="torso_3" />
+    <position class="med"   name="link5_act" joint="torso_4" />
+    <position           name="link6_act" joint="torso_5" />
+
+    <position class="med" name="left_arm_1_act" joint="left_arm_0" />
+    <position class="med" name="left_arm_2_act" joint="left_arm_1" />
+    <position name="left_arm_3_act" joint="left_arm_2" />
+    <position class="med" name="left_arm_4_act" joint="left_arm_3" />
+    <position name="left_arm_5_act" joint="left_arm_4" />
+    <position name="left_arm_6_act" joint="left_arm_5" />
+    <position name="left_arm_7_act" joint="left_arm_6" />
+
+    <position class="med" name="right_arm_1_act" joint="right_arm_0" />
+    <position class="med" name="right_arm_2_act" joint="right_arm_1" />
+    <position name="right_arm_3_act" joint="right_arm_2" />
+    <position class="med" name="right_arm_4_act" joint="right_arm_3" />
+    <position name="right_arm_5_act" joint="right_arm_4" />
+    <position name="right_arm_6_act" joint="right_arm_5" />
+    <position name="right_arm_7_act" joint="right_arm_6" />
+
+    <position name="head_0_act" joint="head_0" />
+    <position name="head_1_act" joint="head_1" />
+
+    <position name="gripper_r_act" joint="gripper_finger_r1" kp="800" dampratio="1" inheritrange="1"/>
+    <position name="gripper_l_act" joint="gripper_finger_l1" kp="800" dampratio="1" inheritrange="1"/>
+  </actuator>
+</mujoco>

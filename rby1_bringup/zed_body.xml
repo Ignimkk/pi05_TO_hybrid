@@ -1,0 +1,10 @@
+<mujocoinclude>
+  <body name="zed_camera" pos="0.02 0 0.065" euler="0 0 0">
+    <inertial pos="0 0 0" mass="0.17" diaginertia="0.0005 0.0005 0.0005"/>
+    <geom type="mesh" mesh="zed2i_mesh" class="visual" rgba="0.25 0.25 0.25 1"/>
+    <site name="zed_left_site"  pos="0.02  0.06 0" size="0.005" rgba="0 1 0 1" group="4"/>
+    <site name="zed_right_site" pos="0.02 -0.06 0" size="0.005" rgba="1 0 0 1" group="4"/>
+    <camera name="zed_left"  pos="0.02  0.06 0" xyaxes="0 -1 0  0 0 1" fovy="90"/>
+    <camera name="zed_right" pos="0.02 -0.06 0" xyaxes="0 -1 0  0 0 1" fovy="90"/>
+  </body>
+</mujocoinclude>

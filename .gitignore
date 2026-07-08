@@ -1,0 +1,22 @@
+# Exclude OpenPI source
+/openpi/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ROS / colcon build outputs
+build/
+install/
+log/
+
+# Logs
+*.log
+MUJOCO_LOG.TXT
+
+# Editor
+.vscode/
+.idea/
