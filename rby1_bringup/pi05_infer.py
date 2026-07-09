@@ -26,13 +26,6 @@ Two ways to run:
          --max-steps 60 --record /tmp/rby1_aloha.mp4
 
 2. Split mode — MuJoCo (sim + interactive viewer) on your local PC, model
-   inference on a remote GPU server. On the server:
-     XLA_FLAGS="--xla_gpu_enable_command_buffer=" XLA_PYTHON_CLIENT_PREALLOCATE=false \
-         python scripts/serve_policy.py --env DROID --port 8000
-   Then on the local PC:
-     python pi05_infer.py --model droid --remote <server-ip>:8000
-
-2. Split mode — MuJoCo (sim + interactive viewer) on your local PC, model
    inference on a remote GPU server. On the server, start the policy once
    (runs on GPU automatically if JAX sees one; add JAX_PLATFORMS=cpu to force CPU;
    same XLA env vars as above needed on this container's virtualized GPU):
@@ -59,8 +52,6 @@ import argparse
 import os
 import pathlib
 import sys
-import pathlib
-import sys
 import time
 import numpy as np
 
@@ -71,8 +62,6 @@ import mujoco
 import mujoco.viewer
 from PIL import Image
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-MODEL_XML = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml")
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODEL_XML = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml")
 
