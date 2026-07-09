@@ -1,7 +1,15 @@
-"""RBY1 x pi0.5 inference smoke test — DROID / LIBERO / base variants.
+"""RBY1 x pi0.5 inference smoke test — DROID / LIBERO / base / aloha variants.
 
-Loads chosen pi0.5 checkpoint, feeds ZED-left image + right-arm proprio,
-integrates predicted actions into position ctrl on RBY1's right arm + gripper.
+Loads chosen pi0.5 checkpoint, feeds cameras + proprio, integrates predicted
+actions into position ctrl on RBY1.
+
+Model variants and required cameras/state:
+  - droid  : zed_left (+ zero wrist)             , right arm only (7+1)
+  - libero : zed_left (+ zero wrist)             , right arm only (7+1)
+  - base   : zed_left (+ zero wrist)             , right arm only (7+1) — uses droid transform
+  - aloha  : zed_left + wrist_cam_l + wrist_cam_r, BOTH arms (6+1)+(6+1) = 14
+             * for zero-shot embodiment test only; do not use "aloha" naming later
+             * pi0_aloha_pen_uncap ckpt (dual-arm 7-DoF ViperX; last joint dropped for us)
 
 Two ways to run:
 
@@ -14,10 +22,15 @@ Two ways to run:
    inference call) — the env vars below route around it; harmless on a normal GPU:
      XLA_FLAGS="--xla_gpu_enable_command_buffer=" XLA_PYTHON_CLIENT_PREALLOCATE=false \
          python pi05_infer.py --model droid
-     python pi05_infer.py --model libero
-     python pi05_infer.py --model base   # base ckpt, DROID transform
-     python pi05_infer.py --model droid --headless \
-         --max-steps 60 --record /tmp/rby1_pi05_droid.mp4
+     python pi05_infer.py --model aloha --headless \
+         --max-steps 60 --record /tmp/rby1_aloha.mp4
+
+2. Split mode — MuJoCo (sim + interactive viewer) on your local PC, model
+   inference on a remote GPU server. On the server:
+     XLA_FLAGS="--xla_gpu_enable_command_buffer=" XLA_PYTHON_CLIENT_PREALLOCATE=false \
+         python scripts/serve_policy.py --env DROID --port 8000
+   Then on the local PC:
+     python pi05_infer.py --model droid --remote <server-ip>:8000
 
 2. Split mode — MuJoCo (sim + interactive viewer) on your local PC, model
    inference on a remote GPU server. On the server, start the policy once
@@ -36,26 +49,30 @@ Two ways to run:
 Notes on interpretation
 -----------------------
 - DROID  actions: (chunk, 8) = 7 joint velocities (clip [-1,1]) + 1 gripper position [0,1].
-- LIBERO actions: (chunk, 7) = 6 EE delta + 1 gripper. We do NOT solve IK for LIBERO here —
-  the first 6 dims are applied as joint delta signals for pipeline validation only.
+- LIBERO actions: (chunk, 7) = 6 EE delta + 1 gripper. Applied naively as joint delta.
+- ALOHA  actions: (chunk, 14) = [L 6 joint, L gripper, R 6 joint, R gripper]. Applied as
+                  joint delta on joints[:6] of each arm (arm_6 held fixed).
+                  Note: pi0_aloha_pen_uncap is trained for ViperX, so raw scale is off.
 - base model has no task-specific norm stats; outputs are expected to be low-quality zero-shot.
 """
 import argparse
 import os
 import pathlib
 import sys
+import pathlib
+import sys
 import time
 import numpy as np
 
 if "--headless" in sys.argv and "MUJOCO_GL" not in os.environ:
-    # No GPU EGL ICD in a plain container -> force CPU offscreen rendering.
-    # Left unset for the interactive (non-headless) path so a real display / GLFW window still works.
     os.environ["MUJOCO_GL"] = "osmesa"
 
 import mujoco
 import mujoco.viewer
 from PIL import Image
 
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+MODEL_XML = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml")
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODEL_XML = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml")
 
@@ -70,20 +87,33 @@ MODELS = {
         "config": "pi05_libero",
         "checkpoint": "gs://openpi-assets/checkpoints/pi05_libero",
         "obs_format": "libero",
-        "action_format": "libero",      # 6 dims applied to joints[:6] + 1 gripper
+        "action_format": "libero",      # 6 dims -> joints[:6] + 1 gripper
     },
     "base": {
-        "config": "pi05_droid",         # reuse DROID transform (base has no dedicated inference config)
+        "config": "pi05_droid",
         "checkpoint": "gs://openpi-assets/checkpoints/pi05_base",
         "obs_format": "droid",
         "action_format": "droid",
     },
+    "aloha": {
+        # For zero-shot dual-arm + 3-camera pipeline test only.
+        # Publicly released pi0.5-ALOHA checkpoint doesn't exist, so we use pi0 variant.
+        "config": "pi0_aloha_pen_uncap",
+        "checkpoint": "gs://openpi-assets/checkpoints/pi0_aloha_pen_uncap",
+        "obs_format": "aloha",
+        "action_format": "aloha",       # 14 = [L 6 jvel, L grip, R 6 jvel, R grip]
+    },
 }
 
+# Single-arm (droid/libero/base) uses right arm.
 RIGHT_ARM_JOINTS = [f"right_arm_{i}" for i in range(7)]
 RIGHT_ARM_ACTS   = [f"right_arm_{i+1}_act" for i in range(7)]
-GRIPPER_JOINT = "gripper_finger_r1"
-GRIPPER_ACT   = "gripper_r_act"
+LEFT_ARM_JOINTS  = [f"left_arm_{i}" for i in range(7)]
+LEFT_ARM_ACTS    = [f"left_arm_{i+1}_act" for i in range(7)]
+GRIPPER_R_JOINT = "gripper_finger_r1"
+GRIPPER_R_ACT   = "gripper_r_act"
+GRIPPER_L_JOINT = "gripper_finger_l1"
+GRIPPER_L_ACT   = "gripper_l_act"
 GRIPPER_OPEN, GRIPPER_CLOSED = -0.05, 0.0
 
 CTRL_HZ = 15
@@ -97,16 +127,32 @@ def render_cam(model, data, renderer, cam_name, size=224):
     return np.asarray(im)
 
 
-def build_obs(obs_format, base_img, wrist_img, joint_pos, grip_norm, prompt):
-    if obs_format == "droid":
-        return {
-            "observation/exterior_image_1_left": base_img,
-            "observation/wrist_image_left": wrist_img,
-            "observation/joint_position": joint_pos,
-            "observation/gripper_position": np.array([grip_norm], dtype=np.float64),
-            "prompt": prompt,
-        }
-    if obs_format == "libero":
+def _hwc_to_chw(img):
+    """Convert (H, W, C) uint8 image to (C, H, W) as expected by AlohaInputs."""
+    return np.transpose(np.asarray(img), (2, 0, 1))
+
+
+def build_obs(obs_format, m, d, renderer, idx, prompt):
+    """Assemble the observation dict expected by the chosen policy transform.
+
+    `idx` is a dict of joint qpos indices computed once in main:
+        right_q, right_grip_q, left_q, left_grip_q
+    """
+    if obs_format in ("droid", "libero"):
+        base_img = render_cam(m, d, renderer, "zed_left")
+        wrist_img = np.zeros((224, 224, 3), dtype=np.uint8)
+        joint_pos = np.array([d.qpos[i] for i in idx["right_q"]], dtype=np.float64)
+        grip_norm = float(abs(d.qpos[idx["right_grip_q"]]) / abs(GRIPPER_OPEN))
+
+        if obs_format == "droid":
+            return {
+                "observation/exterior_image_1_left": base_img,
+                "observation/wrist_image_left": wrist_img,
+                "observation/joint_position": joint_pos,
+                "observation/gripper_position": np.array([grip_norm], dtype=np.float64),
+                "prompt": prompt,
+            }
+        # libero
         state = np.concatenate([joint_pos, np.array([grip_norm], dtype=np.float64)])
         return {
             "observation/state": state,
@@ -114,13 +160,82 @@ def build_obs(obs_format, base_img, wrist_img, joint_pos, grip_norm, prompt):
             "observation/wrist_image": wrist_img,
             "prompt": prompt,
         }
+
+    if obs_format == "aloha":
+        # 3 real cameras + 14-dim dual-arm state.
+        base_img    = render_cam(m, d, renderer, "zed_left")      # cam_high
+        wrist_l_img = render_cam(m, d, renderer, "wrist_cam_l")   # cam_left_wrist
+        wrist_r_img = render_cam(m, d, renderer, "wrist_cam_r")   # cam_right_wrist
+
+        left_joint_pos  = np.array([d.qpos[i] for i in idx["left_q"]], dtype=np.float64)
+        right_joint_pos = np.array([d.qpos[i] for i in idx["right_q"]], dtype=np.float64)
+        left_grip_norm  = float(abs(d.qpos[idx["left_grip_q"]])  / abs(GRIPPER_OPEN))
+        right_grip_norm = float(abs(d.qpos[idx["right_grip_q"]]) / abs(GRIPPER_OPEN))
+
+        # ALOHA layout: [left 6 joints, left gripper, right 6 joints, right gripper]
+        # RBY1 has 7-DoF arms; drop the last wrist joint (arm_6) for state.
+        state = np.concatenate([
+            left_joint_pos[:6],
+            [left_grip_norm],
+            right_joint_pos[:6],
+            [right_grip_norm],
+        ]).astype(np.float64)
+
+        return {
+            "state": state,
+            "images": {
+                "cam_high":        _hwc_to_chw(base_img),
+                "cam_left_wrist":  _hwc_to_chw(wrist_l_img),
+                "cam_right_wrist": _hwc_to_chw(wrist_r_img),
+            },
+            "prompt": prompt,
+        }
+
     raise ValueError(f"unknown obs_format: {obs_format}")
 
 
-def load_local_policy(mcfg):
-    """Load the policy in-process. Requires jax + the openpi package."""
-    import jax
+def apply_action(action_format, action, d, idx, act):
+    """Set d.ctrl in-place based on model action.
 
+    `idx` / `act` are the joint-qpos / actuator-id maps built in main.
+    """
+    dt = 1.0 / CTRL_HZ
+    if action_format == "droid":
+        joint_vel = np.clip(action[:7], -1.0, 1.0)
+        grip_action = 1.0 if float(action[7]) > 0.5 else 0.0
+        for i, aid in enumerate(act["right_a"]):
+            d.ctrl[aid] = d.qpos[idx["right_q"][i]] + joint_vel[i] * dt
+        d.ctrl[act["right_grip_a"]] = GRIPPER_OPEN * (1.0 - grip_action)
+        return
+
+    if action_format == "libero":
+        joint_delta = np.clip(action[:6], -0.5, 0.5) * 0.1
+        grip_action = 1.0 if float(action[6]) > 0.5 else 0.0
+        for i in range(6):
+            d.ctrl[act["right_a"][i]] = d.qpos[idx["right_q"][i]] + joint_delta[i]
+        d.ctrl[act["right_grip_a"]] = GRIPPER_OPEN * (1.0 - grip_action)
+        return
+
+    if action_format == "aloha":
+        # (14,) = [L 6 dims, L grip, R 6 dims, R grip]. Apply as joint delta on joints[:6];
+        # arm_6 (last wrist joint) held fixed. Scale small since ALOHA units may not match.
+        left_delta  = np.clip(action[0:6],  -0.5, 0.5) * 0.1
+        left_grip   = 1.0 if float(action[6])  > 0.5 else 0.0
+        right_delta = np.clip(action[7:13], -0.5, 0.5) * 0.1
+        right_grip  = 1.0 if float(action[13]) > 0.5 else 0.0
+
+        for i in range(6):
+            d.ctrl[act["left_a"][i]]  = d.qpos[idx["left_q"][i]]  + left_delta[i]
+            d.ctrl[act["right_a"][i]] = d.qpos[idx["right_q"][i]] + right_delta[i]
+        d.ctrl[act["left_grip_a"]]  = GRIPPER_OPEN * (1.0 - left_grip)
+        d.ctrl[act["right_grip_a"]] = GRIPPER_OPEN * (1.0 - right_grip)
+        return
+
+    raise ValueError(f"unknown action_format: {action_format}")
+
+
+def load_local_policy(mcfg):
+    import jax
     from openpi.policies import policy_config as _policy_config
     from openpi.shared import download
     from openpi.training import config as _config
@@ -135,7 +250,6 @@ def load_local_policy(mcfg):
 
 
 def load_remote_policy(remote):
-    """Connect to a `scripts/serve_policy.py` websocket server. Only needs openpi_client."""
     from openpi_client import websocket_client_policy as _websocket_client_policy
 
     host, _, port = remote.partition(":")
@@ -144,48 +258,23 @@ def load_remote_policy(remote):
     return policy
 
 
-def apply_action(action_format, action, d, right_qidx, right_aid, grip_aid):
-    """Set d.ctrl in-place based on model action."""
-    dt = 1.0 / CTRL_HZ
-    if action_format == "droid":
-        # 7 joint velocities + 1 gripper position
-        joint_vel = np.clip(action[:7], -1.0, 1.0)
-        grip_action = 1.0 if float(action[7]) > 0.5 else 0.0
-        for i, aid in enumerate(right_aid):
-            d.ctrl[aid] = d.qpos[right_qidx[i]] + joint_vel[i] * dt
-        d.ctrl[grip_aid] = GRIPPER_OPEN * (1.0 - grip_action)
-        return
-
-    if action_format == "libero":
-        # 6 EE delta (nonsense on our joints, applied as delta) + 1 gripper
-        # First 6 dims -> joint delta on joints[:6]; joint 7 held fixed.
-        joint_delta = np.clip(action[:6], -0.5, 0.5) * 0.1
-        grip_action = 1.0 if float(action[6]) > 0.5 else 0.0
-        for i in range(6):
-            d.ctrl[right_aid[i]] = d.qpos[right_qidx[i]] + joint_delta[i]
-        d.ctrl[grip_aid] = GRIPPER_OPEN * (1.0 - grip_action)
-        return
-
-    raise ValueError(f"unknown action_format: {action_format}")
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=list(MODELS.keys()), default="droid",
                     help="which pi0.5 variant to load")
-    ap.add_argument("--prompt", default="pick up the blue block and put it in the brown box")
+    ap.add_argument("--prompt", default="pick up the red block")
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--record", default=None, help="path to .mp4 for third-person recording")
     ap.add_argument("--remote", default=None,
-                     help="host:port of a running scripts/serve_policy.py server; if set, "
-                          "skips local model load and streams obs/actions over websocket instead")
+                    help="host:port of a running scripts/serve_policy.py server; if set, "
+                         "skips local model load and streams obs/actions over websocket instead")
     args = ap.parse_args()
 
     mcfg = MODELS[args.model]
     print(f"=== Model: {args.model} ===")
     if args.remote:
-        print(f"  remote     : {args.remote}  (server must be serving obs_format={mcfg['obs_format']!r})")
+        print(f"  remote     : {args.remote}  (server must serve obs_format={mcfg['obs_format']!r})")
     else:
         print(f"  config     : {mcfg['config']}")
         print(f"  checkpoint : {mcfg['checkpoint']}")
@@ -200,16 +289,26 @@ def main():
     for i in range(m.nu):
         d.ctrl[i] = d.qpos[m.jnt_qposadr[m.actuator_trnid[i, 0]]]
 
-    right_qidx = [m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, j)]
-                  for j in RIGHT_ARM_JOINTS]
-    right_aid  = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, a)
-                  for a in RIGHT_ARM_ACTS]
-    grip_qidx  = m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, GRIPPER_JOINT)]
-    grip_aid   = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, GRIPPER_ACT)
+    # Build joint / actuator index maps once (used by build_obs and apply_action).
+    idx = {
+        "right_q":       [m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, j)]
+                          for j in RIGHT_ARM_JOINTS],
+        "left_q":        [m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, j)]
+                          for j in LEFT_ARM_JOINTS],
+        "right_grip_q":  m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, GRIPPER_R_JOINT)],
+        "left_grip_q":   m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, GRIPPER_L_JOINT)],
+    }
+    act = {
+        "right_a":       [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, a) for a in RIGHT_ARM_ACTS],
+        "left_a":        [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, a) for a in LEFT_ARM_ACTS],
+        "right_grip_a":  mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, GRIPPER_R_ACT),
+        "left_grip_a":   mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, GRIPPER_L_ACT),
+    }
 
     renderer_pol = mujoco.Renderer(m, height=480, width=640)
     renderer_rec = mujoco.Renderer(m, height=480, width=640)
 
+    policy = load_remote_policy(args.remote) if args.remote else load_local_policy(mcfg)
     policy = load_remote_policy(args.remote) if args.remote else load_local_policy(mcfg)
     print(f"Prompt: {args.prompt!r}")
 
@@ -224,21 +323,24 @@ def main():
         chunk_step = 0
         for t_step in range(0, args.max_steps if args.max_steps > 0 else 10**9):
             if chunk is None or chunk_step >= OPEN_LOOP_HORIZON:
-                base_img = render_cam(m, d, renderer_pol, "zed_left")
-                wrist_img = np.zeros((224, 224, 3), dtype=np.uint8)
-                joint_pos = np.array([d.qpos[i] for i in right_qidx], dtype=np.float64)
-                grip_norm = float(abs(d.qpos[grip_qidx]) / abs(GRIPPER_OPEN))
-
-                obs = build_obs(mcfg["obs_format"], base_img, wrist_img, joint_pos, grip_norm, args.prompt)
+                obs = build_obs(mcfg["obs_format"], m, d, renderer_pol, idx, args.prompt)
                 t_infer = time.time()
                 result = policy.infer(obs)
                 chunk = np.asarray(result["actions"])
                 chunk_step = 0
-                print(f"[t={t_step:4d}] infer={time.time()-t_infer:.2f}s  chunk={chunk.shape}  "
-                      f"q_r={joint_pos.round(2).tolist()}  grip={grip_norm:.2f}")
 
-            apply_action(mcfg["action_format"], chunk[chunk_step], d,
-                         right_qidx, right_aid, grip_aid)
+                # brief status line — content varies by embodiment
+                if mcfg["obs_format"] == "aloha":
+                    l_pos = np.array([d.qpos[i] for i in idx["left_q"]], dtype=np.float64)
+                    r_pos = np.array([d.qpos[i] for i in idx["right_q"]], dtype=np.float64)
+                    print(f"[t={t_step:4d}] infer={time.time()-t_infer:.2f}s chunk={chunk.shape}  "
+                          f"q_l={l_pos[:3].round(2).tolist()}...  q_r={r_pos[:3].round(2).tolist()}...")
+                else:
+                    r_pos = np.array([d.qpos[i] for i in idx["right_q"]], dtype=np.float64)
+                    print(f"[t={t_step:4d}] infer={time.time()-t_infer:.2f}s chunk={chunk.shape}  "
+                          f"q_r={r_pos.round(2).tolist()}")
+
+            apply_action(mcfg["action_format"], chunk[chunk_step], d, idx, act)
 
             for _ in range(steps_per_action):
                 mujoco.mj_step(m, d)
