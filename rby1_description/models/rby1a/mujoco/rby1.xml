@@ -57,17 +57,19 @@
       solimp="0.95 0.99 0.001 0.5 2" friction="0.05 0.001 0.05" />
     <light directional="true" diffuse=".8 .8 .8" specular="0 0 0" pos="0 0 5" dir="0 0 -1" castshadow="false" />
 
+    <!-- mocap targets used by follow_mocap.py; hidden from default rendering via group=3.
+         In the viewer press "3" (or in code toggle scene_option.geomgroup[3]) to show them. -->
     <body name="com_target" pos="0.5 0 .5" mocap="true">
-      <geom type="sphere" size=".08" contype="0" conaffinity="0" rgba=".6 .3 .3 .2"/>
-      <site type="sphere" size="0.01" rgba="0 0 1 1" group="1"/>
+      <geom type="sphere" size=".08" contype="0" conaffinity="0" rgba=".6 .3 .3 .2" group="3"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
     </body>
     <body name="link_left_arm_6_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
-      <geom type="sphere" size=".04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2"/>
-      <site type="sphere" size="0.01" rgba="0 0 1 1" group="1"/>
+      <geom type="sphere" size=".04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2" group="3"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
     </body>
     <body name="link_right_arm_6_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
-      <geom type="sphere" size=".04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2"/>
-      <site type="sphere" size="0.01" rgba="0 0 1 1" group="1"/>
+      <geom type="sphere" size=".04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2" group="3"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
     </body>
 
     <body name="base">
@@ -161,7 +163,7 @@
                                 <body name="EE_BODY_R" pos="0 0 -0.1548">
                                   <inertial pos="0 0 0" mass="0" />
                                   <include file="./assets/EE_BODY/geoms.xml" />
-                                  <site name="right_ee" pos="0.0 0 -0.1" size="0.02"/>
+                                  <site name="right_ee" pos="0.0 0 -0.1" size="0.02" group="4"/>
                                 </body>
                                 <body name="ee_finger_r1" pos="0.003 0 -0.2278">
                                   <inertial pos="0.00278346 -3.29e-06 -0.0257011" quat="0.999784 0 0.0208044 0" mass="0.03327" diaginertia="1.23275e-05 1.066e-05 2.22251e-06" />
@@ -222,7 +224,7 @@
                                 <body name="EE_BODY_L" pos="0 0 -0.1548">
                                   <inertial pos="0 0 0" mass="0" />
                                   <include file="./assets/EE_BODY/geoms.xml" />
-                                  <site name="left_ee" pos="0.0 0 -0.1" size="0.02"/>
+                                  <site name="left_ee" pos="0.0 0 -0.1" size="0.02" group="4"/>
                                 </body>
                                 <body name="ee_finger_l1" pos="-0.003 0 -0.2278" quat="4.48966e-11 0 0 1">
                                   <inertial pos="0.00278346 -3.29e-06 -0.0257011" quat="0.999784 0 0.0208044 0" mass="0.03327" diaginertia="1.23275e-05 1.066e-05 2.22251e-06" />

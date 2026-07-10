@@ -23,19 +23,20 @@
   <worldbody>
   
 
+    <!-- ee_target boxes hidden by default (group=3); still exist as mocap bodies. -->
     <body name="left_ee_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
-      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2"/>
-      <site type="sphere" size="0.01" rgba="0 0 1 1" group="1"/>
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2" group="3"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
     </body>
     <body name="right_ee_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
-      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2"/>
-      <site type="sphere" size="0.01" rgba="0 0 1 1" group="1"/>
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2" group="3"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
     </body>
     <include file="../../../../rby1_bringup/scene_blocks.xml"/>
   </worldbody>
 
   <keyframe>
-    <key name='teleop' qpos='0 0 0 0 0 0 0 0 0 0 0 -0.3 -0.3 -0.0 -1.95 -0.3 1.5 -1.57 0 0 -0.3 0.3 -0.0 -1.95 0.3 1.5 -1.57 0 0 0 0.7  0.45 0.00 0.87 1 0 0 0  0.55 0.30 0.87 1 0 0 0  0.75 0.30 0.87 1 0 0 0'/>
+    <key name='teleop' qpos='0 0 0 0 0 0 0 0 0 0 0 -0.3 -0.3 -0.0 -1.95 -0.3 1.5 -1.57 0 0 -0.3 0.3 -0.0 -1.95 0.3 1.5 -1.57 0 0 0 0.7  0.55 -0.30 0.87 1 0 0 0  0.55 0.30 0.87 1 0 0 0  0.65 0.25 0.87 1 0 0 0'/>
   </keyframe>
 
   <actuator>

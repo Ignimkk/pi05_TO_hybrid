@@ -12,7 +12,8 @@
 
   <!-- Brown open-top container -->
   <!-- body center at z = table_top(0.82) + half_height(0.04) = 0.86 -->
-  <body name="container" pos="0.70 0 0.86">
+  <!-- Moved from x=0.70 to x=0.60 so both arms can reach the container center comfortably. -->
+  <body name="container" pos="0.60 0 0.86">
     <geom name="cont_base"    type="box" size="0.11 0.11 0.005"  pos="0 0 -0.035"
           rgba="0.55 0.35 0.20 1" friction="1 0.005 0.001"/>
     <geom name="cont_wall_px" type="box" size="0.005 0.11 0.035" pos=" 0.105 0      0.005"
@@ -26,7 +27,7 @@
   </body>
 
   <!-- Red block: between robot and container, close to robot -->
-  <body name="red_block" pos="0.45 0 0.87">
+  <body name="red_block" pos="0.55 -0.30 0.87">
     <freejoint name="red_block_free"/>
     <inertial pos="0 0 0" mass="0.05" diaginertia="2.1e-5 2.1e-5 2.1e-5"/>
     <geom name="red_block_geom" type="box" size="0.025 0.025 0.025"
@@ -42,7 +43,7 @@
   </body>
 
   <!-- Blue block: robot's left side (+Y), back -->
-  <body name="blue_block" pos="0.75 0.30 0.87">
+  <body name="blue_block" pos="0.65 0.25 0.87">
     <freejoint name="blue_block_free"/>
     <inertial pos="0 0 0" mass="0.05" diaginertia="2.1e-5 2.1e-5 2.1e-5"/>
     <geom name="blue_block_geom" type="box" size="0.025 0.025 0.025"
