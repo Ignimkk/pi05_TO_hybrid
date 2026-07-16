@@ -2,7 +2,7 @@
   <compiler angle="radian" autolimits="true" eulerseq="xyz" />
 
   <default>
-    <joint armature="10" damping="50" range="-3.14 3.14" />
+    <joint armature="10" damping="30" range="-3.14 3.14" />
     <material specular="0.5" shininess="0.25" />
   </default>
 

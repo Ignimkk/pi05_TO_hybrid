@@ -4,7 +4,7 @@
 
   <default>
     <!-- <position ctrlrange="-3000000 3000000" ctrllimited="true" /> -->
-    <position kp="500" dampratio="1" inheritrange="1"/>
+    <position kp="1500" dampratio="1" inheritrange="1"/>
     <default class="stiff"><position kp="6000" dampratio="1" inheritrange="1"/></default>
     <default class="med">  <position kp="2000" dampratio="1" inheritrange="1"/></default>
     <default class="visual">
@@ -69,7 +69,7 @@
     <position name="head_0_act" joint="head_0" />
     <position name="head_1_act" joint="head_1" />
 
-    <position name="gripper_r_act" joint="gripper_finger_r1" kp="800" dampratio="1" inheritrange="1"/>
-    <position name="gripper_l_act" joint="gripper_finger_l1" kp="800" dampratio="1" inheritrange="1"/>
+    <position name="gripper_r_act" joint="gripper_finger_r1" kp="1500" dampratio="1" inheritrange="1"/>
+    <position name="gripper_l_act" joint="gripper_finger_l1" kp="1500" dampratio="1" inheritrange="1"/>
   </actuator>
 </mujoco>

@@ -43,7 +43,7 @@ GRIPPER_L_JOINT = "gripper_finger_l1"
 
 # Position-actuator ctrl values driving gripper_finger_r1/l1.
 # The equality constraint mirrors this onto _r2/_l2.
-GRIPPER_OPEN   = -0.05
+GRIPPER_OPEN   = -0.045
 GRIPPER_CLOSED = 0.0
 
 # ---------- model index helpers ----------
