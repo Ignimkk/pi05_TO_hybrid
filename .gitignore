@@ -1,6 +1,9 @@
 # Exclude OpenPI source
 /openpi/
 
+# Dataset / recorded videos
+/data/
+
 # Python
 __pycache__/
 *.py[cod]
