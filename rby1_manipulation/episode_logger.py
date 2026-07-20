@@ -91,6 +91,33 @@ class LeRobotWriter:
         for cam in CAMERAS:
             (self.root / "videos" / "chunk-000" / f"observation.images.{cam}").mkdir(parents=True, exist_ok=True)
 
+        # RESUME: if the dataset root already contains episodes (e.g. from a
+        # prior subprocess run of collect_dataset.py), load their metadata so
+        # new_episode() picks up the next available episode_index and
+        # finalize() rewrites the jsonl files with the accumulated set (not
+        # just this subprocess's episodes). Without this, every subprocess
+        # starts from episode_index=0 and overwrites episode_000000.*.
+        self._load_existing_state()
+
+    def _load_existing_state(self) -> None:
+        """Populate _episodes_written and _task_to_index from any existing
+        episodes.jsonl / tasks.jsonl in the dataset root."""
+        episodes_jsonl = self.root / "meta" / "episodes.jsonl"
+        if episodes_jsonl.exists():
+            with open(episodes_jsonl) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        self._episodes_written.append(json.loads(line))
+        tasks_jsonl = self.root / "meta" / "tasks.jsonl"
+        if tasks_jsonl.exists():
+            with open(tasks_jsonl) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        entry = json.loads(line)
+                        self._task_to_index[entry["task"]] = int(entry["task_index"])
+
     # ---------- public API ----------
 
     def new_episode(self, task: str, *, episode_index: Optional[int] = None) -> EpisodeBuffer:
@@ -103,6 +130,10 @@ class LeRobotWriter:
     def save_episode(self, ep: EpisodeBuffer) -> None:
         if len(ep) == 0:
             raise ValueError("cannot save an empty episode")
+        # Auto-register the task string if the caller mutated ep.task after
+        # new_episode() (e.g. adding a "[FAIL] " prefix for failed episodes).
+        if ep.task not in self._task_to_index:
+            self._task_to_index[ep.task] = len(self._task_to_index)
         self._write_parquet(ep)
         self._write_videos(ep)
         self._episodes_written.append({
