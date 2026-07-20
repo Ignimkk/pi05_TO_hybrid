@@ -150,7 +150,7 @@ def build_phase_c3_left_approach(target_rot, block_p) -> list:
     to the block's actual face normals. Empirical XY offset (tunable)."""
     # Mirror of scenario 2's RIGHT approach offset (-0.03, -0.017); Y sign
     # flipped since LEFT approaches from +Y side.
-    approach = block_p - np.array([0.015, -0.030, 0.0])
+    approach = block_p - np.array([0.015, -0.025, 0.0])
     return [
         Waypoint("l_approach", approach, target_rot,
                  "open", 1.5, wait_after=0.4),
@@ -393,6 +393,11 @@ def main():
     ap.add_argument("--interactive-left", action="store_true",
                     help="Run phases A+B only, then hand control of the "
                          "LEFT arm to the user via a mocap sphere.")
+    ap.add_argument("--task-prompt", default=None,
+                    help="override the LeRobot task prompt string (else auto-built)")
+    ap.add_argument("--save-failed", action="store_true",
+                    help="Also save the LeRobot episode when SUCCESS=False "
+                         "(task prompt prefixed with '[FAIL] ').")
     args = ap.parse_args()
 
     model = mujoco.MjModel.from_xml_path(MODEL_XML)
@@ -453,8 +458,9 @@ def main():
     log_renderer = None
     if args.log_dataset:
         writer = LeRobotWriter(args.log_dataset, fps=args.log_fps, image_wh=(224, 224))
-        prompt = (f"pick up the {args.block} block with the right hand, hand it off "
-                  f"to the left hand in mid-air, and place it in the brown box")
+        prompt = args.task_prompt or (
+            f"pick up the {args.block} block with the right hand, hand it off "
+            f"to the left hand in mid-air, and place it in the brown box")
         episode = writer.new_episode(task=prompt)
         log_renderer = mujoco.Renderer(model, height=224, width=224)
 
@@ -632,6 +638,11 @@ def main():
             writer.save_episode(episode)
             writer.finalize()
             print(f"    episode ({len(episode)} frames) -> {args.log_dataset}")
+        elif args.save_failed:
+            episode.task = f"[FAIL] {episode.task}"
+            writer.save_episode(episode)
+            writer.finalize()
+            print(f"    [FAIL] episode ({len(episode)} frames) -> {args.log_dataset}")
         else:
             print("    (episode NOT saved: success=False)")
 

@@ -129,17 +129,24 @@ def spawn_pick_block_in_left_envelope(model, data, joint_name, rng, z=0.87):
     set_block_pose(model, data, joint_name, [x, y, z])
 
 
-def build_phase_a_left_pick(block_pos, left_ee_down) -> list:
-    """LEFT: pick block from table with default (fingers-down) orientation,
-    lift straight up so we can rotate the wrist without hitting anything."""
+def build_phase_a1_left_descend(block_pos, left_ee_down) -> list:
+    """LEFT phase A1: approach + descend (gripper open). Fingers are
+    positioned around the block, ready for the explicit adaptive close
+    performed manually in Phase A2 (see run())."""
     approach = block_pos + np.array([0.0, 0.0, 0.10])
     grasp    = block_pos + np.array([0.0, 0.0, 0.02])
-    lift     = block_pos + np.array([0.0, 0.0, 0.18])
     return [
-        Waypoint("l_approach", approach, left_ee_down, "open",  1.5),
-        Waypoint("l_descend",  grasp,    left_ee_down, "open",  1.2),
-        Waypoint("l_grasp",    grasp,    left_ee_down, "close", 0.2, wait_after=0.8),
-        Waypoint("l_lift",     lift,     left_ee_down, "hold",  1.2, wait_after=0.4),
+        Waypoint("l_approach", approach, left_ee_down, "open", 1.5),
+        Waypoint("l_descend",  grasp,    left_ee_down, "open", 1.2, wait_after=0.1),
+    ]
+
+
+def build_phase_a3_left_lift(block_pos, left_ee_down) -> list:
+    """LEFT phase A3: lift block straight up while HOLDING the gripper
+    ctrl at whatever tight value Phase A2 set."""
+    lift = block_pos + np.array([0.0, 0.0, 0.18])
+    return [
+        Waypoint("l_lift", lift, left_ee_down, "hold", 1.2, wait_after=0.4),
     ]
 
 
@@ -451,6 +458,11 @@ def main():
                     help="Run phases A+B only, then hand control of the "
                          "RIGHT arm to the user via a mocap sphere in the "
                          "viewer. Prints RIGHT joint values periodically.")
+    ap.add_argument("--task-prompt", default=None,
+                    help="override the LeRobot task prompt string (else auto-built)")
+    ap.add_argument("--save-failed", action="store_true",
+                    help="Also save the LeRobot episode when SUCCESS=False "
+                         "(task prompt prefixed with '[FAIL] ').")
     args = ap.parse_args()
 
     model = mujoco.MjModel.from_xml_path(MODEL_XML)
@@ -499,7 +511,8 @@ def main():
     print(f"  LEFT  handoff EE  : {LEFT_HANDOFF_EE_POS.round(3)}  (tool -Y, grip Z, top/bottom faces)")
     print(f"  RIGHT (info only) : {RIGHT_HANDOFF_EE_POS.round(3)}  (tool +Y, grip X @ approach, +/-X side faces)")
 
-    phase_a = build_phase_a_left_pick(block_pos_now, left_ee_down)
+    phase_a1 = build_phase_a1_left_descend(block_pos_now, left_ee_down)
+    phase_a3 = build_phase_a3_left_lift(block_pos_now, left_ee_down)
     phase_b = build_phase_b_left_carry_to_handoff(left_ee_face)
     phase_g = build_phase_g_left_retract(left_ee_face)
     # phase_c is built inside run() using the actual block pose after
@@ -518,8 +531,9 @@ def main():
     log_renderer = None
     if args.log_dataset:
         writer = LeRobotWriter(args.log_dataset, fps=args.log_fps, image_wh=(224, 224))
-        prompt = (f"pick up the {args.block} block with the left hand, hand it off "
-                  f"to the right hand in mid-air, and place it in the brown box")
+        prompt = args.task_prompt or (
+            f"pick up the {args.block} block with the left hand, hand it off "
+            f"to the right hand in mid-air, and place it in the brown box")
         episode = writer.new_episode(task=prompt)
         log_renderer = mujoco.Renderer(model, height=224, width=224)
 
@@ -558,8 +572,35 @@ def main():
         log_state["last_t"] = t_sim
 
     def run(viewer=None):
-        print("  --- phase A: LEFT picks block from table ---")
-        execute_waypoints(model, data, left_arm, left_mask, phase_a,
+        # A1: approach + descend (gripper open)
+        print("  --- phase A1: LEFT approach + descend (gripper open) ---")
+        execute_waypoints(model, data, left_arm, left_mask, phase_a1,
+                          viewer=viewer, on_step=on_step)
+
+        # A2: adaptive close — initial close (0.0, 0.5s) then match ctrl to
+        # contact qpos + 0.001 so grip force reduces to ~kp * 0.001. This
+        # is the same pattern used in scenarios 1 and 3.
+        print("  --- phase A2: LEFT adaptive close (0.0 -> contact + 0.001) ---")
+        dt = model.opt.timestep
+        data.ctrl[left_arm.gripper_aid] = 0.0
+        for _ in range(int(round(0.5 / dt))):
+            mujoco.mj_step(model, data)
+            if viewer is not None:
+                viewer.sync()
+            on_step()
+        contact_qpos = float(data.qpos[left_arm.gripper_qidx])
+        data.ctrl[left_arm.gripper_aid] = contact_qpos + 0.001
+        for _ in range(int(round(0.3 / dt))):
+            mujoco.mj_step(model, data)
+            if viewer is not None:
+                viewer.sync()
+            on_step()
+        print(f"    [LEFT GRIPPER] contact qpos={contact_qpos:+.4f}  "
+              f"ctrl={data.ctrl[left_arm.gripper_aid]:+.4f}  (tiny squeeze)")
+
+        # A3: lift block straight up
+        print("  --- phase A3: LEFT lift ---")
+        execute_waypoints(model, data, left_arm, left_mask, phase_a3,
                           viewer=viewer, on_step=on_step)
 
         print("  --- phase B: LEFT carries + rotates wrist to handoff pose ---")
@@ -676,6 +717,11 @@ def main():
             writer.save_episode(episode)
             writer.finalize()
             print(f"    episode ({len(episode)} frames) -> {args.log_dataset}")
+        elif args.save_failed:
+            episode.task = f"[FAIL] {episode.task}"
+            writer.save_episode(episode)
+            writer.finalize()
+            print(f"    [FAIL] episode ({len(episode)} frames) -> {args.log_dataset}")
         else:
             print("    (episode NOT saved: success=False)")
 
