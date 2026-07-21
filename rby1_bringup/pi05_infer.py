@@ -105,7 +105,7 @@ MODELS = {
     "rby1": {
         # Our own LoRA fine-tune on rby1_dataset_v1 (see src/openpi/training/config.py).
         "config": "pi05_rby1_lora",
-        "checkpoint": "/root/work/pi05_TO_hybrid/checkpoints/pi05_rby1_lora/full_run_30k/29999",
+        "checkpoint": "/mnt/dev/work/pi05_TO_hybrid/checkpoints/pi05_rby1_lora/full_run_30k/29999",
         "obs_format": "rby1",
         "action_format": "rby1",        # 14 = [L 6 abs joint, L grip, R 6 abs joint, R grip]
     },
