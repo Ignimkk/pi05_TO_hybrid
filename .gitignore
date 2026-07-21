@@ -25,3 +25,4 @@ MUJOCO_LOG.TXT
 .idea/
 
 /checkpoints/
+rby1_bringup/policy_input_recording/
