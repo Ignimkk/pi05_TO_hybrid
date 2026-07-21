@@ -128,6 +128,7 @@ RBY1_GRIPPER_OPEN = -0.045
 
 CTRL_HZ = 15
 OPEN_LOOP_HORIZON = 8
+POLICY_CAMERA_NAMES = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 
 
 def render_cam(model, data, renderer, cam_name, size=224):
@@ -140,6 +141,61 @@ def render_cam(model, data, renderer, cam_name, size=224):
 def _hwc_to_chw(img):
     """Convert (H, W, C) uint8 image to (C, H, W) as expected by AlohaInputs."""
     return np.transpose(np.asarray(img), (2, 0, 1))
+
+
+def capture_policy_input_frames(obs, frame_buffers):
+    """Copy the three image arrays from the exact observation sent to the policy."""
+    for camera_name in POLICY_CAMERA_NAMES:
+        image = np.asarray(obs["images"][camera_name])
+        if image.ndim != 3:
+            raise ValueError(f"policy input {camera_name!r} has invalid shape {image.shape}")
+        # RBY1/ALOHA policy observations store images as CHW; video encoders expect HWC.
+        if image.shape[0] in (1, 3, 4) and image.shape[-1] not in (1, 3, 4):
+            image = np.transpose(image, (1, 2, 0))
+        frame_buffers[camera_name].append(np.ascontiguousarray(image[..., :3]).copy())
+
+
+def save_policy_input_videos(output_dir, frame_buffers):
+    """Write one MP4 per camera into a new, non-overwriting run directory."""
+    if not any(frame_buffers[name] for name in POLICY_CAMERA_NAMES):
+        print("no policy-input frames to save")
+        return
+
+    recording_root = pathlib.Path(output_dir)
+    recording_root.mkdir(parents=True, exist_ok=True)
+    for run_index in range(1_000_000):
+        run_dir = recording_root / f"run_{run_index:04d}"
+        try:
+            run_dir.mkdir(exist_ok=False)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise RuntimeError(f"no available run directory under {recording_root}")
+
+    print(f"policy-input recording directory: {run_dir}")
+    input_fps = CTRL_HZ / OPEN_LOOP_HORIZON
+
+    try:
+        import imageio.v2 as imageio
+    except ImportError:
+        imageio = None
+
+    for camera_name in POLICY_CAMERA_NAMES:
+        frames = frame_buffers[camera_name]
+        if not frames:
+            continue
+        output_path = run_dir / f"{camera_name}.mp4"
+        print(f"saving {len(frames)} policy-input frames -> {output_path}")
+        if imageio is not None:
+            imageio.mimsave(output_path, frames, fps=input_fps)
+            continue
+
+        png_dir = run_dir / camera_name
+        png_dir.mkdir(parents=True, exist_ok=True)
+        for frame_index, frame in enumerate(frames):
+            Image.fromarray(frame).save(png_dir / f"{frame_index:04d}.png")
+        print(f"(imageio not installed, saved {camera_name} as a PNG sequence)")
 
 
 def build_obs(obs_format, m, d, renderer, idx, prompt):
@@ -326,6 +382,8 @@ def main():
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--record", default=None, help="path to .mp4 for third-person recording")
+    ap.add_argument("--record-inputs", default=None, metavar="DIR",
+                    help="directory for cam_high/cam_left_wrist/cam_right_wrist policy-input MP4s")
     ap.add_argument("--remote", default=None,
                     help="host:port of a running scripts/serve_policy.py server; if set, "
                          "skips local model load and streams obs/actions over websocket instead")
@@ -338,6 +396,8 @@ def main():
         ap.error("--start-delay must be non-negative")
 
     mcfg = MODELS[args.model]
+    if args.record_inputs and mcfg["obs_format"] not in ("aloha", "rby1"):
+        ap.error("--record-inputs requires --model aloha or --model rby1")
     print(f"=== Model: {args.model} ===")
     if args.remote:
         print(f"  remote     : {args.remote}  (server must serve obs_format={mcfg['obs_format']!r})")
@@ -389,6 +449,7 @@ def main():
     print(f"sim dt={m.opt.timestep}s  action interval={1/CTRL_HZ:.3f}s  sim-steps/action={steps_per_action}")
 
     video_frames = []
+    input_frame_buffers = {name: [] for name in POLICY_CAMERA_NAMES}
     ctx = None if args.headless else mujoco.viewer.launch_passive(m, d)
 
     def wait_before_inference():
@@ -424,6 +485,8 @@ def main():
         for t_step in range(0, args.max_steps if args.max_steps > 0 else 10**9):
             if chunk is None or chunk_step >= OPEN_LOOP_HORIZON:
                 obs = build_obs(mcfg["obs_format"], m, d, renderer_pol, idx, args.prompt)
+                if args.record_inputs:
+                    capture_policy_input_frames(obs, input_frame_buffers)
                 t_infer = time.time()
                 result = policy.infer(obs)
                 chunk = np.asarray(result["actions"])
@@ -471,6 +534,8 @@ def main():
                 for i, fr in enumerate(video_frames):
                     Image.fromarray(fr).save(args.record.replace(".mp4", f"_{i:04d}.png"))
                 print("(imageio not installed, saved as PNG sequence)")
+        if args.record_inputs:
+            save_policy_input_videos(args.record_inputs, input_frame_buffers)
 
 
 if __name__ == "__main__":
