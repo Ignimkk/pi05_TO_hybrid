@@ -23,3 +23,5 @@ MUJOCO_LOG.TXT
 # Editor
 .vscode/
 .idea/
+
+/checkpoints/
