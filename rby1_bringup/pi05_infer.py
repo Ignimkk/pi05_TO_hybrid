@@ -329,7 +329,13 @@ def main():
     ap.add_argument("--remote", default=None,
                     help="host:port of a running scripts/serve_policy.py server; if set, "
                          "skips local model load and streams obs/actions over websocket instead")
+    ap.add_argument("--start-delay", type=float, default=2.0,
+                    help="seconds to run the simulator and show the viewer before the first "
+                         "policy inference request (default: 2.0; use 0 to disable)")
     args = ap.parse_args()
+
+    if args.start_delay < 0:
+        ap.error("--start-delay must be non-negative")
 
     mcfg = MODELS[args.model]
     print(f"=== Model: {args.model} ===")
@@ -385,6 +391,33 @@ def main():
     video_frames = []
     ctx = None if args.headless else mujoco.viewer.launch_passive(m, d)
 
+    def wait_before_inference():
+        """Advance the initial scene in real time before requesting an action."""
+        if args.start_delay <= 0:
+            return True
+
+        print(f"Showing initial scene for {args.start_delay:.1f}s before inference...")
+        deadline = time.monotonic() + args.start_delay
+        next_step = time.monotonic()
+
+        while time.monotonic() < deadline:
+            if ctx is not None and not ctx.is_running():
+                return False
+
+            mujoco.mj_step(m, d)
+            if ctx is not None:
+                ctx.sync()
+
+            # Keep the warm-up synchronized to wall-clock time so the configured
+            # delay corresponds to what the user sees in the interactive viewer.
+            next_step += m.opt.timestep
+            sleep_time = next_step - time.monotonic()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+        print("Starting policy inference.")
+        return True
+
     def loop_body():
         chunk = None
         chunk_step = 0
@@ -422,7 +455,8 @@ def main():
                 break
 
     try:
-        loop_body()
+        if wait_before_inference():
+            loop_body()
     except KeyboardInterrupt:
         print("interrupted")
     finally:

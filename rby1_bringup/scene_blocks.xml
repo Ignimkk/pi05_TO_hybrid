@@ -44,8 +44,8 @@
 
   <!-- Blue block: robot's left side (+Y), back.
        x was 0.65, outside LEFT_ARM_REACH x=[0.45,0.60] (scene_utils.py) used during
-       data collection -- i.e. out of the training distribution. Moved inside. -->
-  <body name="blue_block" pos="0.50 0.18 0.87">
+       data collection, i.e. out of the training distribution. Moved inside. -->
+  <body name="blue_block" pos="0.45 0.13 0.87">
     <freejoint name="blue_block_free"/>
     <inertial pos="0 0 0" mass="0.05" diaginertia="2.1e-5 2.1e-5 2.1e-5"/>
     <geom name="blue_block_geom" type="box" size="0.025 0.025 0.025"
