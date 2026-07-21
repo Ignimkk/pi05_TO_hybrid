@@ -345,6 +345,10 @@ def main():
     d = mujoco.MjData(m)
     key = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "teleop")
     mujoco.mj_resetDataKeyframe(m, d, key)
+    # Without this, body/geom world transforms (xpos/xquat) are stale until the first
+    # mj_step -- the very first observation (which drives the first action chunk) would
+    # be rendered from a blank/garbage scene.
+    mujoco.mj_forward(m, d)
 
     for i in range(m.nu):
         d.ctrl[i] = d.qpos[m.jnt_qposadr[m.actuator_trnid[i, 0]]]
@@ -365,8 +369,12 @@ def main():
         "left_grip_a":   mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, GRIPPER_L_ACT),
     }
 
-    renderer_pol = mujoco.Renderer(m, height=480, width=640)
-    renderer_rec = mujoco.Renderer(m, height=480, width=640)
+    # Policy-input renderer MUST match the training-data collection resolution exactly
+    # (rby1_manipulation/scenario*.py, collect_batch.py render at native 224x224).
+    # Rendering at a different aspect ratio (e.g. 640x480) and resizing down distorts
+    # the field of view relative to what the model was trained on.
+    renderer_pol = mujoco.Renderer(m, height=224, width=224)
+    renderer_rec = mujoco.Renderer(m, height=480, width=640)  # third-person --record only
 
     policy = load_remote_policy(args.remote) if args.remote else load_local_policy(mcfg)
     print(f"Prompt: {args.prompt!r}")
