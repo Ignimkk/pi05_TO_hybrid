@@ -1,4 +1,4 @@
-"""RBY1 x pi0.5 inference smoke test — DROID / LIBERO / base / aloha variants.
+"""RBY1 x pi0.5 inference smoke test — DROID / LIBERO / base / aloha / rby1 variants.
 
 Loads chosen pi0.5 checkpoint, feeds cameras + proprio, integrates predicted
 actions into position ctrl on RBY1.
@@ -10,6 +10,11 @@ Model variants and required cameras/state:
   - aloha  : zed_left + wrist_cam_l + wrist_cam_r, BOTH arms (6+1)+(6+1) = 14
              * for zero-shot embodiment test only; do not use "aloha" naming later
              * pi0_aloha_pen_uncap ckpt (dual-arm 7-DoF ViperX; last joint dropped for us)
+  - rby1   : zed_left + wrist_cam_l + wrist_cam_r, BOTH arms (6+1)+(6+1) = 14
+             * our own pi05_rby1_lora LoRA fine-tune (see checkpoints/pi05_rby1_lora/)
+             * actions are already absolute joint targets (server-side AbsoluteActions
+               transform undoes the delta-joint training representation), so applied
+               directly to ctrl -- no local delta/velocity math needed
 
 Two ways to run:
 
@@ -46,6 +51,11 @@ Notes on interpretation
 - ALOHA  actions: (chunk, 14) = [L 6 joint, L gripper, R 6 joint, R gripper]. Applied as
                   joint delta on joints[:6] of each arm (arm_6 held fixed).
                   Note: pi0_aloha_pen_uncap is trained for ViperX, so raw scale is off.
+- RBY1   actions: (chunk, 14) = [L 6 joint, L gripper, R 6 joint, R gripper], same layout
+                  as ALOHA but values are absolute joint-position targets (radians) /
+                  gripper in [0,1] -- applied directly to ctrl, matching how the training
+                  dataset's "action" column was recorded (arm_6 held fixed, dropped from
+                  training data same as ALOHA).
 - base model has no task-specific norm stats; outputs are expected to be low-quality zero-shot.
 """
 import argparse
@@ -92,6 +102,13 @@ MODELS = {
         "obs_format": "aloha",
         "action_format": "aloha",       # 14 = [L 6 jvel, L grip, R 6 jvel, R grip]
     },
+    "rby1": {
+        # Our own LoRA fine-tune on rby1_dataset_v1 (see src/openpi/training/config.py).
+        "config": "pi05_rby1_lora",
+        "checkpoint": "/root/work/pi05_TO_hybrid/checkpoints/pi05_rby1_lora/full_run_30k/29999",
+        "obs_format": "rby1",
+        "action_format": "rby1",        # 14 = [L 6 abs joint, L grip, R 6 abs joint, R grip]
+    },
 }
 
 # Single-arm (droid/libero/base) uses right arm.
@@ -104,6 +121,10 @@ GRIPPER_R_ACT   = "gripper_r_act"
 GRIPPER_L_JOINT = "gripper_finger_l1"
 GRIPPER_L_ACT   = "gripper_l_act"
 GRIPPER_OPEN, GRIPPER_CLOSED = -0.05, 0.0
+# rby1_dataset_v1 was collected with this exact gripper-open ctrl value (see
+# rby1_manipulation/ik_utils.py GRIPPER_OPEN=-0.045); must match for correct
+# state/action normalization on the "rby1" model.
+RBY1_GRIPPER_OPEN = -0.045
 
 CTRL_HZ = 15
 OPEN_LOOP_HORIZON = 8
@@ -180,6 +201,37 @@ def build_obs(obs_format, m, d, renderer, idx, prompt):
             "prompt": prompt,
         }
 
+    if obs_format == "rby1":
+        # Same 3-camera / 14-dim dual-arm layout as "aloha", but with the exact
+        # gripper-open value the training dataset was collected with.
+        base_img    = render_cam(m, d, renderer, "zed_left")      # cam_high
+        wrist_l_img = render_cam(m, d, renderer, "wrist_cam_l")   # cam_left_wrist
+        wrist_r_img = render_cam(m, d, renderer, "wrist_cam_r")   # cam_right_wrist
+
+        left_joint_pos  = np.array([d.qpos[i] for i in idx["left_q"]], dtype=np.float64)
+        right_joint_pos = np.array([d.qpos[i] for i in idx["right_q"]], dtype=np.float64)
+        left_grip_norm  = float(abs(d.qpos[idx["left_grip_q"]])  / abs(RBY1_GRIPPER_OPEN))
+        right_grip_norm = float(abs(d.qpos[idx["right_grip_q"]]) / abs(RBY1_GRIPPER_OPEN))
+
+        # Dataset layout: [left 6 joints, left gripper, right 6 joints, right gripper].
+        # RBY1 arms are 7-DoF; the collection scripts always dropped arm_6 (qidx[:6]).
+        state = np.concatenate([
+            left_joint_pos[:6],
+            [left_grip_norm],
+            right_joint_pos[:6],
+            [right_grip_norm],
+        ]).astype(np.float64)
+
+        return {
+            "state": state,
+            "images": {
+                "cam_high":        _hwc_to_chw(base_img),
+                "cam_left_wrist":  _hwc_to_chw(wrist_l_img),
+                "cam_right_wrist": _hwc_to_chw(wrist_r_img),
+            },
+            "prompt": prompt,
+        }
+
     raise ValueError(f"unknown obs_format: {obs_format}")
 
 
@@ -220,6 +272,23 @@ def apply_action(action_format, action, d, idx, act):
         d.ctrl[act["right_grip_a"]] = GRIPPER_OPEN * (1.0 - right_grip)
         return
 
+    if action_format == "rby1":
+        # (14,) = [L 6 abs joint targets, L grip, R 6 abs joint targets, R grip].
+        # The server's data_transforms already convert the model's internal delta-joint
+        # prediction back to absolute targets (AbsoluteActions) before returning, so we
+        # apply these directly to ctrl -- no local delta/velocity math, unlike droid/libero/aloha.
+        left_targets  = action[0:6]
+        left_grip     = float(np.clip(action[6], 0.0, 1.0))
+        right_targets = action[7:13]
+        right_grip    = float(np.clip(action[13], 0.0, 1.0))
+
+        for i in range(6):
+            d.ctrl[act["left_a"][i]]  = left_targets[i]
+            d.ctrl[act["right_a"][i]] = right_targets[i]
+        d.ctrl[act["left_grip_a"]]  = left_grip * RBY1_GRIPPER_OPEN
+        d.ctrl[act["right_grip_a"]] = right_grip * RBY1_GRIPPER_OPEN
+        return
+
     raise ValueError(f"unknown action_format: {action_format}")
 
 
@@ -251,7 +320,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=list(MODELS.keys()), default="droid",
                     help="which pi0.5 variant to load")
-    ap.add_argument("--prompt", default="pick up the red block")
+    ap.add_argument("--prompt", default="put the red block in the brown box with your right hand",
+                    help="for --model rby1, use one of the 6 exact task strings the model "
+                         "was fine-tuned on (see rby1_dataset_v1/meta/tasks.jsonl)")
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--record", default=None, help="path to .mp4 for third-person recording")
@@ -298,7 +369,6 @@ def main():
     renderer_rec = mujoco.Renderer(m, height=480, width=640)
 
     policy = load_remote_policy(args.remote) if args.remote else load_local_policy(mcfg)
-    policy = load_remote_policy(args.remote) if args.remote else load_local_policy(mcfg)
     print(f"Prompt: {args.prompt!r}")
 
     steps_per_action = max(1, int(round(1.0 / (CTRL_HZ * m.opt.timestep))))
@@ -319,7 +389,7 @@ def main():
                 chunk_step = 0
 
                 # brief status line — content varies by embodiment
-                if mcfg["obs_format"] == "aloha":
+                if mcfg["obs_format"] in ("aloha", "rby1"):
                     l_pos = np.array([d.qpos[i] for i in idx["left_q"]], dtype=np.float64)
                     r_pos = np.array([d.qpos[i] for i in idx["right_q"]], dtype=np.float64)
                     print(f"[t={t_step:4d}] infer={time.time()-t_infer:.2f}s chunk={chunk.shape}  "
