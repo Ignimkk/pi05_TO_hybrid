@@ -32,7 +32,7 @@
       <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2" group="3"/>
       <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
     </body>
-    <include file="../../../../rby1_bringup/scene_blocks.xml"/>
+    <include file="scenes/scene_blocks.xml"/>
   </worldbody>
 
   <keyframe>

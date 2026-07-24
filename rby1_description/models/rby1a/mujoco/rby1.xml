@@ -49,8 +49,8 @@
     <include file="./assets/PAN_TILT_1/assets.xml" />
     <include file="./assets/PAN_TILT_2/assets.xml" />
     <include file="./assets/PAN_TILT_3/assets.xml" />
-    <include file="../../../../rby1_bringup/zed_asset.xml" />
-    <include file="../../../../rby1_bringup/d435i_asset.xml" />
+    <include file="sensors/zed_asset.xml" />
+    <include file="sensors/d435i_asset.xml" />
   </asset>
 
   <worldbody>
@@ -156,7 +156,7 @@
                                 <inertial pos="0.00101419 0.000398553 -0.149904" quat="0.730015 -0.0098152 -0.00428736 0.683347" mass="1.16921" diaginertia="0.00296506 0.00265919 0.00114611" />
                                 <joint name="right_arm_6" pos="0 0 0" axis="0 0 1" limited="true" range="-2.96706 2.96706" />
                                 <include file="./assets/LINK_13/geoms.xml" />
-                                <include file="../../../../rby1_bringup/wrist_cam_body.xml" />
+                                <include file="sensors/wrist_cam_body.xml" />
                                 <body name="FT_SENSOR_R" pos="0 0 -0.1087">
                                   <inertial pos="0 0 0" mass="0" />
                                   <include file="./assets/FT_SENSOR_R/geoms.xml" />
@@ -217,7 +217,7 @@
                                 <inertial pos="-0.00092669 0.000508285 -0.149904" quat="0.72966 0.00249295 0.012223 0.683697" mass="1.16921" diaginertia="0.00296541 0.00265922 0.00114589" />
                                 <joint name="left_arm_6" pos="0 0 0" axis="0 0 1" limited="true" range="-2.96706 2.96706" />
                                 <include file="./assets/LINK_20/geoms.xml" />
-                                <include file="../../../../rby1_bringup/wrist_cam_body_l.xml" />
+                                <include file="sensors/wrist_cam_body_l.xml" />
                                 <body name="FT_SENSOR_L" pos="0 0 -0.1087">
                                   <inertial pos="0 0 0" mass="0"/>
                                   <include file="./assets/FT_SENSOR_L/geoms.xml" />
@@ -252,7 +252,7 @@
                       <inertial pos="-0.00081966 0.00099024 0.022837" quat="0.797736 0.60274 0.0137914 -0.0114992" mass="0.0358537" diaginertia="2.04697e-05 1.31161e-05 1.02242e-05" />
                       <joint name="head_1" pos="0 0 0" axis="0 1 0" limited="true" range="-0.35 1.57" />
                       <include file="./assets/PAN_TILT_3/geoms.xml" />
-                      <include file="../../../../rby1_bringup/zed_body.xml" />
+                      <include file="sensors/zed_body.xml" />
                     </body>
                   </body>
                 </body>

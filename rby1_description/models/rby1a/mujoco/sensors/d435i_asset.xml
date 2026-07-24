@@ -1,0 +1,23 @@
+<mujocoinclude>
+  <!-- Intel RealSense D435i visual assets, from mujoco_menagerie/realsense_d435i.
+       Materials are prefixed "d435i_" to avoid clashing with rby1's own materials,
+       and specular/shininess are set explicitly (the menagerie model applied these
+       via a `d435i` default class, which we flatten here). -->
+  <material name="d435i_Black_Acrylic"   specular="0" shininess="0.25" rgba="0.070360 0.070360 0.070360 1"/>
+  <material name="d435i_Cameras_Gray"    specular="0" shininess="0.25" rgba="0.296138 0.296138 0.296138 1"/>
+  <material name="d435i_IR_Emitter_Lens" specular="0" shininess="0.25" rgba="0.287440 0.665387 0.327778 1"/>
+  <material name="d435i_IR_Lens"         specular="0" shininess="0.25" rgba="0.035601 0.035601 0.035601 1"/>
+  <material name="d435i_IR_Rim"          specular="0" shininess="0.25" rgba="0.799102 0.806952 0.799103 1"/>
+  <material name="d435i_Metal_Casing"    specular="0" shininess="0.25" rgba="1 1 1 1"/>
+  <material name="d435i_RGB_Pupil"       specular="0" shininess="0.25" rgba="0.087140 0.002866 0.009346 1"/>
+
+  <mesh name="d435i_0" file="meshes/d435i/d435i_0.obj"/>
+  <mesh name="d435i_1" file="meshes/d435i/d435i_1.obj"/>
+  <mesh name="d435i_2" file="meshes/d435i/d435i_2.obj"/>
+  <mesh name="d435i_3" file="meshes/d435i/d435i_3.obj"/>
+  <mesh name="d435i_4" file="meshes/d435i/d435i_4.obj"/>
+  <mesh name="d435i_5" file="meshes/d435i/d435i_5.obj"/>
+  <mesh name="d435i_6" file="meshes/d435i/d435i_6.obj"/>
+  <mesh name="d435i_7" file="meshes/d435i/d435i_7.obj"/>
+  <mesh name="d435i_8" file="meshes/d435i/d435i_8.obj"/>
+</mujocoinclude>
