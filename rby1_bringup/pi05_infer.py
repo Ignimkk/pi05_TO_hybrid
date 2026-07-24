@@ -131,6 +131,20 @@ OPEN_LOOP_HORIZON = 8
 POLICY_CAMERA_NAMES = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 
 
+def configure_view_camera(camera, view):
+    """Apply a reproducible viewer/recording camera without changing policy input cameras."""
+    if view == "free":
+        return
+    if view != "front":
+        raise ValueError(f"unknown view preset: {view}")
+    mujoco.mjv_defaultCamera(camera)
+    camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+    camera.lookat[:] = np.asarray([0.45, 0.0, 0.85], dtype=np.float64)
+    camera.distance = 1.7
+    camera.azimuth = 180.0
+    camera.elevation = -18.0
+
+
 def render_cam(model, data, renderer, cam_name, size=224):
     renderer.update_scene(data, camera=cam_name)
     img = renderer.render()
@@ -372,6 +386,30 @@ def load_remote_policy(remote):
     return policy
 
 
+def build_seam_session(policy, mcfg, seam_config_path):
+    """Wrap a locally-loaded policy with SEAM/VLS and return a SeamPolicySession (local mode only)."""
+    ws_root = REPO_ROOT.parent  # .../pi0_TO_ws
+    if str(ws_root) not in sys.path:
+        sys.path.insert(0, str(ws_root))
+    from openpi.shared import download
+    from openpi.training import config as _config
+    from benchmark.seam_vla.config import SeamConfig
+    from benchmark.seam_vla.factory import build_seam_policy
+    from benchmark.seam_vla.policy.seam_policy import SeamPolicySession
+
+    if seam_config_path is None:
+        seam_config_path = str(ws_root / "benchmark/seam_vla/configs/seam_rby1.yaml")
+    seam_cfg = SeamConfig.from_yaml(seam_config_path)
+    train_config = _config.get_config(mcfg["config"])
+    ckpt_dir = download.maybe_download(mcfg["checkpoint"])
+    seam_policy = build_seam_policy(policy, train_config, ckpt_dir, seam_cfg)
+    print(f"[SEAM] enabled (local): H={seam_policy.H} K={seam_policy.K} L={seam_policy.L} "
+          f"M={seam_policy.M} N={seam_policy.N} D={seam_policy.D} "
+          f"guided_dims={int(seam_policy._dim_mask.sum())} "
+          f"compensation={seam_cfg.seam_delta_base_compensation}")
+    return SeamPolicySession(seam_policy)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=list(MODELS.keys()), default="droid",
@@ -381,23 +419,51 @@ def main():
                          "was fine-tuned on (see rby1_dataset_v1/meta/tasks.jsonl)")
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--headless", action="store_true")
+    ap.add_argument(
+        "--view",
+        choices=("free", "front"),
+        default="free",
+        help="interactive/recording camera preset; does not alter policy input cameras",
+    )
     ap.add_argument("--record", default=None, help="path to .mp4 for third-person recording")
+    ap.add_argument(
+        "--trajectory-out",
+        default=None,
+        metavar="NPZ",
+        help="save executed actions, measured RBY1 state, returned chunks, and inference timing "
+             "for BJ/IJ/CD/AVb evaluation",
+    )
     ap.add_argument("--record-inputs", default=None, metavar="DIR",
                     help="directory for cam_high/cam_left_wrist/cam_right_wrist policy-input MP4s")
     ap.add_argument("--remote", default=None,
                     help="host:port of a running scripts/serve_policy.py server; if set, "
                          "skips local model load and streams obs/actions over websocket instead")
+    ap.add_argument("--seam", action="store_true",
+                    help="apply SEAM/VLS chunk-boundary smoothing. Local mode: wraps the in-process "
+                         "policy. Remote mode: sends a seam_reset flag and assumes the server is "
+                         "running serve_seam_policy.py (VLS must run where the model is).")
+    ap.add_argument("--seam-config", default=None,
+                    help="path to a SEAM yaml (default: benchmark/seam_vla/configs/seam_rby1.yaml)")
     ap.add_argument("--start-delay", type=float, default=2.0,
                     help="seconds to run the simulator and show the viewer before the first "
                          "policy inference request (default: 2.0; use 0 to disable)")
+    ap.add_argument("--speed", type=float, default=0,
+                    help="playback speed relative to real time: 1.0 paces the sim to wall "
+                         "clock (physics run ~17x faster than real time otherwise), 0.5 is "
+                         "half speed / slow motion, 0 disables pacing (run as fast as "
+                         "possible, e.g. for --headless recording)")
     args = ap.parse_args()
 
     if args.start_delay < 0:
         ap.error("--start-delay must be non-negative")
+    if args.speed < 0:
+        ap.error("--speed must be non-negative (0 = unlimited)")
 
     mcfg = MODELS[args.model]
     if args.record_inputs and mcfg["obs_format"] not in ("aloha", "rby1"):
         ap.error("--record-inputs requires --model aloha or --model rby1")
+    if args.trajectory_out and mcfg["obs_format"] != "rby1":
+        ap.error("--trajectory-out currently requires --model rby1")
     print(f"=== Model: {args.model} ===")
     if args.remote:
         print(f"  remote     : {args.remote}  (server must serve obs_format={mcfg['obs_format']!r})")
@@ -441,16 +507,51 @@ def main():
     # the field of view relative to what the model was trained on.
     renderer_pol = mujoco.Renderer(m, height=224, width=224)
     renderer_rec = mujoco.Renderer(m, height=480, width=640)  # third-person --record only
+    recording_camera = -1
+    if args.view != "free":
+        recording_camera = mujoco.MjvCamera()
+        configure_view_camera(recording_camera, args.view)
 
     policy = load_remote_policy(args.remote) if args.remote else load_local_policy(mcfg)
     print(f"Prompt: {args.prompt!r}")
+
+    # SEAM/VLS setup. Local: wrap the in-process policy. Remote: VLS runs server-side (serve_seam_policy);
+    # we only send a one-time seam_reset so the server starts a fresh per-episode SEAM state.
+    seam_session = None
+    seam_remote = False
+    if args.seam:
+        if args.remote:
+            seam_remote = True
+            print("[SEAM] remote mode: the server must be running "
+                  "benchmark/seam_vla/serving/serve_seam_policy.py; sending seam_reset on first request.")
+        else:
+            seam_session = build_seam_session(policy, mcfg, args.seam_config)
 
     steps_per_action = max(1, int(round(1.0 / (CTRL_HZ * m.opt.timestep))))
     print(f"sim dt={m.opt.timestep}s  action interval={1/CTRL_HZ:.3f}s  sim-steps/action={steps_per_action}")
 
     video_frames = []
     input_frame_buffers = {name: [] for name in POLICY_CAMERA_NAMES}
+    executed_actions = []
+    measured_states = []
+    predicted_chunks = []
+    chunk_start_steps = []
+    inference_states = []
+    inference_ms = []
+    inference_used_vls = []
+    inference_chunk_indices = []
     ctx = None if args.headless else mujoco.viewer.launch_passive(m, d)
+    if ctx is not None and args.view != "free":
+        configure_view_camera(ctx.cam, args.view)
+        ctx.sync()
+
+    def rby1_state():
+        """Current 14-D physical state in the policy/action layout."""
+        left = np.asarray([d.qpos[i] for i in idx["left_q"][:6]], dtype=np.float64)
+        right = np.asarray([d.qpos[i] for i in idx["right_q"][:6]], dtype=np.float64)
+        left_grip = float(abs(d.qpos[idx["left_grip_q"]]) / abs(RBY1_GRIPPER_OPEN))
+        right_grip = float(abs(d.qpos[idx["right_grip_q"]]) / abs(RBY1_GRIPPER_OPEN))
+        return np.concatenate([left, [left_grip], right, [right_grip]])
 
     def wait_before_inference():
         """Advance the initial scene in real time before requesting an action."""
@@ -479,39 +580,91 @@ def main():
         print("Starting policy inference.")
         return True
 
+    # Wall-clock seconds one action step should occupy at the requested speed.
+    # steps_per_action sim steps advance steps_per_action*timestep of sim time;
+    # dividing by --speed lets 0.5 play at half speed, etc. speed<=0 disables pacing.
+    sim_seconds_per_action = steps_per_action * m.opt.timestep
+    wall_seconds_per_action = (sim_seconds_per_action / args.speed) if args.speed > 0 else 0.0
+
     def loop_body():
         chunk = None
         chunk_step = 0
+        # Wall-clock anchor for the next action step; reset after each inference so a
+        # slow inference call is not "paid back" by sprinting the following steps.
+        next_action_deadline = time.monotonic()
         for t_step in range(0, args.max_steps if args.max_steps > 0 else 10**9):
             if chunk is None or chunk_step >= OPEN_LOOP_HORIZON:
                 obs = build_obs(mcfg["obs_format"], m, d, renderer_pol, idx, args.prompt)
                 if args.record_inputs:
                     capture_policy_input_frames(obs, input_frame_buffers)
                 t_infer = time.time()
-                result = policy.infer(obs)
-                chunk = np.asarray(result["actions"])
+                seam_timing = {}
+                if seam_session is not None:
+                    # Local SEAM: VLS-guided chunk; first chunk is baseline automatically.
+                    chunk_arr, diag = seam_session.predict_chunk(obs, want_diagnostics=False)
+                    chunk = np.asarray(chunk_arr)
+                    seam_timing = {
+                        "used_vls": bool(diag.used_vls),
+                        "chunk_index": int(diag.chunk_index),
+                    }
+                else:
+                    if seam_remote and t_step == 0:
+                        obs["seam_reset"] = True  # tell server-side SEAM to start a fresh episode
+                    result = policy.infer(obs)
+                    chunk = np.asarray(result["actions"])
+                    seam_timing = result.get("seam_timing", {})
+                infer_elapsed_ms = (time.time() - t_infer) * 1000.0
                 chunk_step = 0
+
+                if args.trajectory_out:
+                    predicted_chunks.append(chunk.copy())
+                    chunk_start_steps.append(t_step)
+                    inference_states.append(np.asarray(obs["state"], dtype=np.float64).copy())
+                    inference_ms.append(infer_elapsed_ms)
+                    inference_used_vls.append(bool(seam_timing.get("used_vls", False)))
+                    inference_chunk_indices.append(
+                        int(seam_timing.get("chunk_index", len(predicted_chunks) - 1))
+                    )
 
                 # brief status line — content varies by embodiment
                 if mcfg["obs_format"] in ("aloha", "rby1"):
                     l_pos = np.array([d.qpos[i] for i in idx["left_q"]], dtype=np.float64)
                     r_pos = np.array([d.qpos[i] for i in idx["right_q"]], dtype=np.float64)
-                    print(f"[t={t_step:4d}] infer={time.time()-t_infer:.2f}s chunk={chunk.shape}  "
+                    print(f"[t={t_step:4d}] infer={infer_elapsed_ms/1000.0:.2f}s chunk={chunk.shape}  "
                           f"q_l={l_pos[:3].round(2).tolist()}...  q_r={r_pos[:3].round(2).tolist()}...")
                 else:
                     r_pos = np.array([d.qpos[i] for i in idx["right_q"]], dtype=np.float64)
-                    print(f"[t={t_step:4d}] infer={time.time()-t_infer:.2f}s chunk={chunk.shape}  "
+                    print(f"[t={t_step:4d}] infer={infer_elapsed_ms/1000.0:.2f}s chunk={chunk.shape}  "
                           f"q_r={r_pos.round(2).tolist()}")
 
-            apply_action(mcfg["action_format"], chunk[chunk_step], d, idx, act)
+                # Inference (and the initial ~10s JIT compile) stalls wall clock while
+                # sim time is frozen; re-anchor so we resume real-time from here.
+                next_action_deadline = time.monotonic()
+
+            action = np.asarray(chunk[chunk_step], dtype=np.float64)
+            apply_action(mcfg["action_format"], action, d, idx, act)
 
             for _ in range(steps_per_action):
                 mujoco.mj_step(m, d)
             if ctx is not None:
                 ctx.sync()
+
+            # Pace to wall clock so the viewer plays at real time (or --speed x).
+            if wall_seconds_per_action > 0:
+                next_action_deadline += wall_seconds_per_action
+                sleep_time = next_action_deadline - time.monotonic()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                else:
+                    # Fell behind (slow render/inference on a weak machine): drop the
+                    # backlog instead of accumulating permanent lag.
+                    next_action_deadline = time.monotonic()
             if args.record:
-                renderer_rec.update_scene(d, camera=-1)
+                renderer_rec.update_scene(d, camera=recording_camera)
                 video_frames.append(renderer_rec.render())
+            if args.trajectory_out:
+                executed_actions.append(action.copy())
+                measured_states.append(rby1_state())
 
             chunk_step += 1
             if ctx is not None and not ctx.is_running():
@@ -536,6 +689,25 @@ def main():
                 print("(imageio not installed, saved as PNG sequence)")
         if args.record_inputs:
             save_policy_input_videos(args.record_inputs, input_frame_buffers)
+        if args.trajectory_out and executed_actions:
+            trajectory_path = pathlib.Path(args.trajectory_out)
+            trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                trajectory_path,
+                executed_actions=np.asarray(executed_actions, dtype=np.float64),
+                measured_qpos=np.asarray(measured_states, dtype=np.float64),
+                predicted_chunks=np.asarray(predicted_chunks, dtype=np.float64),
+                chunk_start_steps=np.asarray(chunk_start_steps, dtype=np.int64),
+                inference_states=np.asarray(inference_states, dtype=np.float64),
+                inference_ms=np.asarray(inference_ms, dtype=np.float64),
+                used_vls=np.asarray(inference_used_vls, dtype=bool),
+                chunk_indices=np.asarray(inference_chunk_indices, dtype=np.int64),
+                prompt=np.asarray(args.prompt),
+                condition=np.asarray("seam" if args.seam else "baseline"),
+                control_hz=np.asarray(CTRL_HZ, dtype=np.int64),
+                execution_length=np.asarray(OPEN_LOOP_HORIZON, dtype=np.int64),
+            )
+            print(f"saving trajectory ({len(executed_actions)} executed steps) -> {trajectory_path}")
 
 
 if __name__ == "__main__":
