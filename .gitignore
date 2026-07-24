@@ -1,5 +1,5 @@
 # Exclude OpenPI source
-/openpi/
+# /openpi/
 
 # Dataset / recorded videos
 /data/
