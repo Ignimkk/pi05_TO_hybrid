@@ -4,10 +4,23 @@
           class="visual" rgba="0.2 0.2 0.2 1"/>
 
     <body name="d435i_cam_l" pos="0.02 0 0.085" quat="0.5 0.5 0.5 0.5">
-      <geom name="d435i_cam_l_geom" type="box" size="0.045 0.014 0.013 "
-            pos="0 -0.013 -0.02"
-            rgba="0.1 0.1 0.1 1" contype="0" conaffinity="0"/>
       <camera name="wrist_cam_l" pos="0 0 0" fovy="90"/>
+      <!-- Real Intel RealSense D435i mesh (from mujoco_menagerie/realsense_d435i)
+           replaces the old placeholder box. Visual only (contype/conaffinity 0),
+           so wrist dynamics/contacts are unchanged; real device mass 0.072 kg is
+           on the casing geom. Rotated 180 deg about Y so the lens (+Z) faces the
+           camera view (-Z), keeping "up" (+Y) aligned. -->
+      <body name="d435i_body_l" quat="0 0 1 0">
+        <geom type="mesh" mesh="d435i_0" material="d435i_IR_Lens"         group="2" contype="0" conaffinity="0" mass="0"/>
+        <geom type="mesh" mesh="d435i_1" material="d435i_IR_Emitter_Lens" group="2" contype="0" conaffinity="0" mass="0"/>
+        <geom type="mesh" mesh="d435i_2" material="d435i_IR_Rim"          group="2" contype="0" conaffinity="0" mass="0"/>
+        <geom type="mesh" mesh="d435i_3" material="d435i_IR_Lens"         group="2" contype="0" conaffinity="0" mass="0"/>
+        <geom type="mesh" mesh="d435i_4" material="d435i_Cameras_Gray"    group="2" contype="0" conaffinity="0" mass="0"/>
+        <geom type="mesh" mesh="d435i_5" material="d435i_Black_Acrylic"   group="2" contype="0" conaffinity="0" mass="0"/>
+        <geom type="mesh" mesh="d435i_6" material="d435i_Black_Acrylic"   group="2" contype="0" conaffinity="0" mass="0"/>
+        <geom type="mesh" mesh="d435i_7" material="d435i_RGB_Pupil"       group="2" contype="0" conaffinity="0" mass="0"/>
+        <geom type="mesh" mesh="d435i_8" material="d435i_Metal_Casing"    group="2" contype="0" conaffinity="0" mass="0.072"/>
+      </body>
     </body>
   </body>
 </mujocoinclude>

@@ -1,0 +1,3 @@
+Intel RealSense D435i assets (d435i_0.obj .. d435i_8.obj).
+Source: https://github.com/google-deepmind/mujoco_menagerie/tree/main/realsense_d435i
+License: Apache-2.0 (see LICENSE in this folder).

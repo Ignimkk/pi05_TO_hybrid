@@ -50,6 +50,7 @@
     <include file="./assets/PAN_TILT_2/assets.xml" />
     <include file="./assets/PAN_TILT_3/assets.xml" />
     <include file="../../../../rby1_bringup/zed_asset.xml" />
+    <include file="../../../../rby1_bringup/d435i_asset.xml" />
   </asset>
 
   <worldbody>
