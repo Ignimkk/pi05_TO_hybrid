@@ -1,0 +1,4 @@
+[submodule "openpi"]
+	path = openpi
+	url = https://github.com/Ignimkk/openpi.git
+	branch = rby1-seam
