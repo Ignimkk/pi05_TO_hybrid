@@ -1,8 +1,18 @@
+"""Experimental pi0.5 inference runner with deterministic RBY1 grid evaluation.
+
+The production-style single-run entry point remains ``pi05_infer.py``.  This
+copy adds the deterministic grid loop and consumes coordinates saved by
+``rby1_manipulation/preview_block_grid.py``.
+"""
+
 import argparse
+import hashlib
+import json
 import os
 import pathlib
 import sys
 import time
+from datetime import datetime, timezone
 import numpy as np
 
 if "--headless" in sys.argv and "MUJOCO_GL" not in os.environ:
@@ -14,6 +24,18 @@ from PIL import Image
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODEL_XML = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml")
+MANIPULATION_DIR = REPO_ROOT / "rby1_manipulation"
+if str(MANIPULATION_DIR) not in sys.path:
+    sys.path.insert(0, str(MANIPULATION_DIR))
+
+from preview_block_grid import (
+    BLOCK_BODIES,
+    COLORS as GRID_COLORS,
+    DEFAULT_GRID_CONFIG,
+    body_position,
+    load_grid_config,
+    reset_and_place_trial,
+)
 
 MODELS = {
     "droid": {
@@ -70,6 +92,60 @@ CTRL_HZ = 15
 OPEN_LOOP_HORIZON = 8
 POLICY_CAMERA_NAMES = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 
+# 14-D RBY1 layout is [L 6 joints, L grip, R 6 joints, R grip]; motion metrics are
+# reported on the 12 arm joints only (grippers are near-binary and would dominate jerk).
+# Matches scripts/plot_rby1_jerk_comparison.py.
+ARM_DIMS = np.asarray([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12], dtype=np.int64)
+
+
+def _json_float(value):
+    """JSON-safe float: NaN/Inf (e.g. a metric with an empty index set) become null."""
+    value = float(value)
+    return value if np.isfinite(value) else None
+
+
+def compute_trial_metrics(executed_actions, measured_states):
+    """Per-trial BJ/IJ/CD/AVb on commanded actions and on the measured physical response.
+
+    Uses the paper-exact implementation in ``benchmark/seam_vla/metrics/motion.py`` so grid
+    results are directly comparable with the offline RB-Y1 evaluation.
+    """
+    ws_root = REPO_ROOT.parent  # .../pi0_TO_ws
+    if str(ws_root) not in sys.path:
+        sys.path.insert(0, str(ws_root))
+    from benchmark.seam_vla.metrics.motion import compute_motion_metrics
+
+    metrics = {}
+    for label, series in (("action", executed_actions), ("qpos", measured_states)):
+        array = np.asarray(series, dtype=np.float64)
+        if array.ndim != 2 or array.shape[0] < 3 or array.shape[1] <= int(ARM_DIMS.max()):
+            continue
+        values = compute_motion_metrics(array[:, ARM_DIMS], OPEN_LOOP_HORIZON)
+        metrics[label] = {
+            "BJ": _json_float(values["BJ"]),
+            "IJ": _json_float(values["IJ"]),
+            "CD": _json_float(values["CD"]),
+            "AVb": _json_float(values["paper_avb"]),
+            "num_boundary": int(values["num_boundary"]),
+            "num_interior": int(values["num_interior"]),
+            "num_steps": int(values["num_steps"]),
+        }
+    return metrics
+
+
+def grid_cell_indices(config, side, grid_index):
+    """Map a linear grid index to (column, row) for heatmap binning.
+
+    Column indexes the distinct x values (near -> far from the robot base) and row indexes the
+    distinct |y| values, so the left and right grids share one coordinate frame despite the
+    right side using negative y.
+    """
+    positions = config["positions"][side]
+    x, y = positions[grid_index]
+    xs = sorted({round(float(p[0]), 6) for p in positions})
+    ys = sorted({round(float(p[1]), 6) for p in positions}, key=abs)
+    return xs.index(round(float(x), 6)), ys.index(round(float(y), 6))
+
 
 def configure_view_camera(camera, view):
     """Apply a reproducible viewer/recording camera without changing policy input cameras."""
@@ -109,23 +185,32 @@ def capture_policy_input_frames(obs, frame_buffers):
         frame_buffers[camera_name].append(np.ascontiguousarray(image[..., :3]).copy())
 
 
-def save_policy_input_videos(output_dir, frame_buffers):
-    """Write one MP4 per camera into a new, non-overwriting run directory."""
+def save_policy_input_videos(output_dir, frame_buffers, *, flat=False):
+    """Write one MP4 per camera.
+
+    By default each call allocates a fresh ``run_XXXX`` subdirectory so repeated single runs
+    never overwrite each other. With ``flat=True`` the files are written straight into
+    ``output_dir`` -- used by the grid experiment, where the trial id already makes the path
+    unique and the extra nesting only obscures it.
+    """
     if not any(frame_buffers[name] for name in POLICY_CAMERA_NAMES):
         print("no policy-input frames to save")
         return
 
     recording_root = pathlib.Path(output_dir)
     recording_root.mkdir(parents=True, exist_ok=True)
-    for run_index in range(1_000_000):
-        run_dir = recording_root / f"run_{run_index:04d}"
-        try:
-            run_dir.mkdir(exist_ok=False)
-            break
-        except FileExistsError:
-            continue
+    if flat:
+        run_dir = recording_root
     else:
-        raise RuntimeError(f"no available run directory under {recording_root}")
+        for run_index in range(1_000_000):
+            run_dir = recording_root / f"run_{run_index:04d}"
+            try:
+                run_dir.mkdir(exist_ok=False)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise RuntimeError(f"no available run directory under {recording_root}")
 
     print(f"policy-input recording directory: {run_dir}")
     input_fps = CTRL_HZ / OPEN_LOOP_HORIZON
@@ -350,6 +435,88 @@ def build_seam_session(policy, mcfg, seam_config_path):
     return SeamPolicySession(seam_policy)
 
 
+def append_jsonl(path, record):
+    """Append and fsync one trial record so a long evaluation can resume safely."""
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def completed_grid_trial_ids(path, *, grid_fingerprint, condition):
+    path = pathlib.Path(path)
+    if not path.exists():
+        return set()
+    completed = set()
+    with path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid JSON in {path}:{line_number}: {exc}") from exc
+            # Setup errors and interrupted rollouts are retried. Results from a
+            # different grid revision or baseline/SEAM condition are independent.
+            if (
+                record.get("status") not in ("setup_error", "interrupted")
+                and record.get("grid_fingerprint") == grid_fingerprint
+                and record.get("condition") == condition
+                and record.get("trial_id")
+            ):
+                completed.add(str(record["trial_id"]))
+    return completed
+
+
+def save_video(path, frames):
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"saving {len(frames)} frames -> {path}")
+    try:
+        import imageio
+        imageio.mimsave(path, frames, fps=CTRL_HZ)
+    except ImportError:
+        for index, frame in enumerate(frames):
+            Image.fromarray(frame).save(path.with_suffix("").as_posix() + f"_{index:04d}.png")
+        print("(imageio not installed, saved as PNG sequence)")
+
+
+def save_trajectory(
+    path,
+    *,
+    executed_actions,
+    measured_states,
+    predicted_chunks,
+    chunk_start_steps,
+    inference_states,
+    inference_ms,
+    inference_used_vls,
+    inference_chunk_indices,
+    prompt,
+    condition,
+):
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        executed_actions=np.asarray(executed_actions, dtype=np.float64),
+        measured_qpos=np.asarray(measured_states, dtype=np.float64),
+        predicted_chunks=np.asarray(predicted_chunks, dtype=np.float64),
+        chunk_start_steps=np.asarray(chunk_start_steps, dtype=np.int64),
+        inference_states=np.asarray(inference_states, dtype=np.float64),
+        inference_ms=np.asarray(inference_ms, dtype=np.float64),
+        used_vls=np.asarray(inference_used_vls, dtype=bool),
+        chunk_indices=np.asarray(inference_chunk_indices, dtype=np.int64),
+        prompt=np.asarray(prompt),
+        condition=np.asarray(condition),
+        control_hz=np.asarray(CTRL_HZ, dtype=np.int64),
+        execution_length=np.asarray(OPEN_LOOP_HORIZON, dtype=np.int64),
+    )
+    print(f"saving trajectory ({len(executed_actions)} executed steps) -> {path}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=list(MODELS.keys()), default="droid",
@@ -362,8 +529,9 @@ def main():
     ap.add_argument(
         "--view",
         choices=("free", "front"),
-        default="free",
-        help="interactive/recording camera preset; does not alter policy input cameras",
+        default=None,
+        help="interactive/recording camera preset; does not alter policy input cameras "
+             "(default: 'front' with --grid-experiment, otherwise 'free')",
     )
     ap.add_argument("--record", default=None, help="path to .mp4 for third-person recording")
     ap.add_argument(
@@ -392,12 +560,100 @@ def main():
                          "clock (physics run ~17x faster than real time otherwise), 0.5 is "
                          "half speed / slow motion, 0 disables pacing (run as fast as "
                          "possible, e.g. for --headless recording)")
+    ap.add_argument(
+        "--grid-experiment",
+        action="store_true",
+        help="run the saved left/right grid for every selected color without per-trial prompts",
+    )
+    ap.add_argument(
+        "--grid-config",
+        type=pathlib.Path,
+        default=DEFAULT_GRID_CONFIG,
+        help="grid JSON written by preview_block_grid.py",
+    )
+    ap.add_argument(
+        "--grid-colors",
+        nargs="+",
+        choices=GRID_COLORS,
+        default=list(GRID_COLORS),
+        help="colors to include in --grid-experiment",
+    )
+    ap.add_argument("--grid-repeats", type=int, default=3)
+    ap.add_argument(
+        "--trial-max-steps",
+        type=int,
+        default=600,
+        help="maximum policy action steps per grid trial (600 at 15 Hz = 40 s)",
+    )
+    ap.add_argument(
+        "--grid-output-dir",
+        type=pathlib.Path,
+        default=pathlib.Path("data/rby1_grid_eval"),
+        help="results.jsonl and optional per-trial artifacts",
+    )
+    ap.add_argument(
+        "--grid-record",
+        action="store_true",
+        help="save a third-person MP4 (front view by default) for every grid trial",
+    )
+    ap.add_argument(
+        "--grid-record-inputs",
+        action="store_true",
+        help="save the three policy-input camera MP4s (cam_high/cam_left_wrist/cam_right_wrist) "
+             "for every grid trial, under <grid-output-dir>/policy_inputs/",
+    )
+    ap.add_argument(
+        "--grid-save-trajectories",
+        action="store_true",
+        help="save the trajectory NPZ for every grid trial",
+    )
+    ap.add_argument(
+        "--grid-record-all",
+        action="store_true",
+        help="shorthand for --grid-record --grid-record-inputs --grid-save-trajectories",
+    )
+    ap.add_argument(
+        "--no-grid-resume",
+        action="store_true",
+        help="do not skip trial_ids already present in results.jsonl",
+    )
     args = ap.parse_args()
+
+    if args.grid_record_all:
+        args.grid_record = True
+        args.grid_record_inputs = True
+        args.grid_save_trajectories = True
+    # The grid evaluation is recorded from a fixed front view so every trial video is
+    # comparable; an explicit --view still wins.
+    if args.view is None:
+        args.view = "front" if args.grid_experiment else "free"
 
     if args.start_delay < 0:
         ap.error("--start-delay must be non-negative")
     if args.speed < 0:
         ap.error("--speed must be non-negative (0 = unlimited)")
+    if args.grid_repeats < 1:
+        ap.error("--grid-repeats must be >= 1")
+    if args.trial_max_steps < 1:
+        ap.error("--trial-max-steps must be >= 1")
+    if args.grid_experiment and args.model != "rby1":
+        ap.error("--grid-experiment requires --model rby1")
+    if args.grid_experiment and args.max_steps > 0:
+        ap.error("use --trial-max-steps instead of --max-steps with --grid-experiment")
+    if args.grid_experiment and args.record:
+        ap.error("use --grid-record instead of --record with --grid-experiment")
+    if args.grid_experiment and args.trajectory_out:
+        ap.error("use --grid-save-trajectories instead of --trajectory-out with --grid-experiment")
+    if args.grid_experiment and args.record_inputs:
+        ap.error("use --grid-record-inputs instead of --record-inputs with --grid-experiment")
+    for flag, name in (
+        (args.grid_record, "--grid-record"),
+        (args.grid_record_inputs, "--grid-record-inputs"),
+        (args.grid_save_trajectories, "--grid-save-trajectories"),
+    ):
+        if flag and not args.grid_experiment:
+            ap.error(f"{name} requires --grid-experiment")
+
     mcfg = MODELS[args.model]
     if args.record_inputs and mcfg["obs_format"] not in ("aloha", "rby1"):
         ap.error("--record-inputs requires --model aloha or --model rby1")
@@ -411,6 +667,13 @@ def main():
         print(f"  checkpoint : {mcfg['checkpoint']}")
     print(f"  obs_format : {mcfg['obs_format']}")
     print(f"  act_format : {mcfg['action_format']}")
+
+    # What each rollout has to buffer. In grid mode the trajectory buffers are always
+    # collected because BJ/IJ/CD/AVb for results.jsonl are derived from them, even when
+    # --grid-save-trajectories is off and the raw NPZ is not written out.
+    capture_video = bool(args.record) or (args.grid_experiment and args.grid_record)
+    capture_inputs = bool(args.record_inputs) or (args.grid_experiment and args.grid_record_inputs)
+    collect_trajectory = bool(args.trajectory_out) or args.grid_experiment
 
     m = mujoco.MjModel.from_xml_path(MODEL_XML)
     d = mujoco.MjData(m)
@@ -525,16 +788,22 @@ def main():
     sim_seconds_per_action = steps_per_action * m.opt.timestep
     wall_seconds_per_action = (sim_seconds_per_action / args.speed) if args.speed > 0 else 0.0
 
-    def loop_body():
+    def loop_body(*, prompt=None, max_steps=None, stop_check=None):
+        policy_prompt = args.prompt if prompt is None else prompt
+        step_limit = (
+            max_steps
+            if max_steps is not None
+            else (args.max_steps if args.max_steps > 0 else 10**9)
+        )
         chunk = None
         chunk_step = 0
         # Wall-clock anchor for the next action step; reset after each inference so a
         # slow inference call is not "paid back" by sprinting the following steps.
         next_action_deadline = time.monotonic()
-        for t_step in range(0, args.max_steps if args.max_steps > 0 else 10**9):
+        for t_step in range(step_limit):
             if chunk is None or chunk_step >= OPEN_LOOP_HORIZON:
-                obs = build_obs(mcfg["obs_format"], m, d, renderer_pol, idx, args.prompt)
-                if args.record_inputs:
+                obs = build_obs(mcfg["obs_format"], m, d, renderer_pol, idx, policy_prompt)
+                if capture_inputs:
                     capture_policy_input_frames(obs, input_frame_buffers)
                 t_infer = time.time()
                 seam_timing = {}
@@ -555,7 +824,7 @@ def main():
                 infer_elapsed_ms = (time.time() - t_infer) * 1000.0
                 chunk_step = 0
 
-                if args.trajectory_out:
+                if collect_trajectory:
                     predicted_chunks.append(chunk.copy())
                     chunk_start_steps.append(t_step)
                     inference_states.append(np.asarray(obs["state"], dtype=np.float64).copy())
@@ -598,55 +867,329 @@ def main():
                     # Fell behind (slow render/inference on a weak machine): drop the
                     # backlog instead of accumulating permanent lag.
                     next_action_deadline = time.monotonic()
-            if args.record:
+            if capture_video:
                 renderer_rec.update_scene(d, camera=recording_camera)
                 video_frames.append(renderer_rec.render())
-            if args.trajectory_out:
+            if collect_trajectory:
                 executed_actions.append(action.copy())
                 measured_states.append(rby1_state())
 
             chunk_step += 1
             if ctx is not None and not ctx.is_running():
-                break
+                return {"status": "interrupted", "steps": t_step + 1}
+            if stop_check is not None:
+                stop_status = stop_check(t_step + 1)
+                if stop_status is not None:
+                    return {"status": stop_status, "steps": t_step + 1}
+        return {"status": "timeout", "steps": step_limit}
+
+    def clear_episode_buffers():
+        video_frames.clear()
+        for frames in input_frame_buffers.values():
+            frames.clear()
+        executed_actions.clear()
+        measured_states.clear()
+        predicted_chunks.clear()
+        chunk_start_steps.clear()
+        inference_states.clear()
+        inference_ms.clear()
+        inference_used_vls.clear()
+        inference_chunk_indices.clear()
+
+    def validate_grid_setup(color, requested, actual):
+        errors = []
+        target_error_xy = float(np.linalg.norm(actual[color][:2] - requested[color][:2]))
+        if target_error_xy > 0.01:
+            errors.append(f"target xy shifted {target_error_xy:.4f} m during settle")
+        for block_color, position in actual.items():
+            if not (0.82 <= position[2] <= 0.90):
+                errors.append(f"{block_color} settled at invalid z={position[2]:.4f}")
+        actual_positions = list(actual.items())
+        for first_index, (first_color, first_pos) in enumerate(actual_positions):
+            for second_color, second_pos in actual_positions[first_index + 1:]:
+                separation = float(np.linalg.norm(first_pos[:2] - second_pos[:2]))
+                if separation < 0.075:
+                    errors.append(
+                        f"{first_color}/{second_color} separation is only {separation:.4f} m"
+                    )
+        return errors
+
+    def make_grid_stop_check(color):
+        container_position = body_position(m, d, "container")
+        block_body_id = mujoco.mj_name2id(
+            m, mujoco.mjtObj.mjOBJ_BODY, BLOCK_BODIES[color]
+        )
+        block_joint_id = mujoco.mj_name2id(
+            m, mujoco.mjtObj.mjOBJ_JOINT, f"{color}_block_free"
+        )
+        block_dof_address = m.jnt_dofadr[block_joint_id]
+        stable_steps = 0
+
+        def stop_check(_step):
+            nonlocal stable_steps
+            position = d.xpos[block_body_id]
+            linear_speed = float(
+                np.linalg.norm(d.qvel[block_dof_address:block_dof_address + 3])
+            )
+
+            # Container interior half-width is 0.10 m and the block half-width is
+            # 0.025 m, hence a fully-contained center must be within 0.075 m.
+            inside_xy = (
+                abs(position[0] - container_position[0]) <= 0.075
+                and abs(position[1] - container_position[1]) <= 0.075
+            )
+            released_height = 0.82 <= position[2] <= 0.92
+            stationary = linear_speed <= 0.03
+            if inside_xy and released_height and stationary:
+                stable_steps += 1
+            else:
+                stable_steps = 0
+            if stable_steps >= 8:
+                return "success"
+
+            # Stop early when recovery is no longer plausible.
+            if (
+                position[2] < 0.72
+                or position[0] < 0.30
+                or position[0] > 1.00
+                or abs(position[1]) > 0.55
+            ):
+                return "failure"
+            return None
+
+        return stop_check
+
+    def run_grid_experiment():
+        config = load_grid_config(args.grid_config)
+        output_dir = args.grid_output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+        results_path = output_dir / "results.jsonl"
+        canonical_grid = json.dumps(
+            config, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+        grid_fingerprint = hashlib.sha256(canonical_grid).hexdigest()[:12]
+        snapshot_path = output_dir / f"grid_config_{grid_fingerprint}.json"
+        if not snapshot_path.exists():
+            with snapshot_path.open("w", encoding="utf-8") as stream:
+                json.dump(config, stream, indent=2, ensure_ascii=False)
+                stream.write("\n")
+        condition = "seam" if args.seam else "baseline"
+        completed = (
+            set()
+            if args.no_grid_resume
+            else completed_grid_trial_ids(
+                results_path,
+                grid_fingerprint=grid_fingerprint,
+                condition=condition,
+            )
+        )
+        trial_specs = [
+            (color, side, grid_index, repeat)
+            for color in args.grid_colors
+            for side in ("left", "right")
+            for grid_index in range(len(config["positions"][side]))
+            for repeat in range(1, args.grid_repeats + 1)
+        ]
+        pending_count = sum(
+            f"{color}_{side}_g{grid_index + 1:02d}_r{repeat}" not in completed
+            for color, side, grid_index, repeat in trial_specs
+        )
+        print(
+            "\n=== RBY1 grid experiment ===\n"
+            f"  config       : {args.grid_config}\n"
+            f"  grid revision: {grid_fingerprint}\n"
+            f"  condition    : {condition}\n"
+            f"  output       : {output_dir}\n"
+            f"  total trials : {len(trial_specs)}\n"
+            f"  completed    : {len(trial_specs) - pending_count}\n"
+            f"  pending      : {pending_count}\n"
+            f"  max steps    : {args.trial_max_steps} "
+            f"({args.trial_max_steps / CTRL_HZ:.1f}s simulation time)"
+        )
+
+        for ordinal, (color, side, grid_index, repeat) in enumerate(trial_specs, start=1):
+            trial_id = f"{color}_{side}_g{grid_index + 1:02d}_r{repeat}"
+            if trial_id in completed:
+                print(f"[{ordinal:03d}/{len(trial_specs)}] SKIP completed {trial_id}")
+                continue
+            if ctx is not None and not ctx.is_running():
+                print("viewer closed; stopping grid experiment")
+                return
+
+            clear_episode_buffers()
+            requested = actual = None
+            setup_errors = []
+            for setup_attempt in range(1, 3):
+                requested, actual = reset_and_place_trial(
+                    m,
+                    d,
+                    config,
+                    color=color,
+                    side=side,
+                    grid_index=grid_index,
+                    settle_seconds=1.5,
+                    on_step=(ctx.sync if ctx is not None else None),
+                )
+                setup_errors = validate_grid_setup(color, requested, actual)
+                if not setup_errors:
+                    break
+                print(
+                    f"[{ordinal:03d}/{len(trial_specs)}] {trial_id} "
+                    f"setup attempt {setup_attempt} invalid: {'; '.join(setup_errors)}"
+                )
+
+            requested_target = requested[color]
+            actual_target = actual[color]
+            prompt = f"put the {color} block in the brown box with your {side} hand"
+            print(
+                f"\n[{ordinal:03d}/{len(trial_specs)}] START {trial_id}\n"
+                f"  prompt    : {prompt}\n"
+                f"  requested : {requested_target.round(4).tolist()}\n"
+                f"  settled   : {actual_target.round(4).tolist()}"
+            )
+
+            started_at = datetime.now(timezone.utc)
+            if setup_errors:
+                record = {
+                    "trial_id": trial_id,
+                    "color": color,
+                    "side": side,
+                    "grid_index": grid_index + 1,
+                    "repeat": repeat,
+                    "requested_xyz": requested_target.tolist(),
+                    "settled_xyz": actual_target.tolist(),
+                    "prompt": prompt,
+                    "condition": condition,
+                    "grid_fingerprint": grid_fingerprint,
+                    "status": "setup_error",
+                    "success": False,
+                    "steps": 0,
+                    "errors": setup_errors,
+                    "started_at": started_at.isoformat(),
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                }
+                append_jsonl(results_path, record)
+                print(f"[{ordinal:03d}/{len(trial_specs)}] SETUP_ERROR {trial_id}")
+                continue
+
+            if seam_session is not None:
+                seam_session.reset()
+
+            outcome = loop_body(
+                prompt=prompt,
+                max_steps=args.trial_max_steps,
+                stop_check=make_grid_stop_check(color),
+            )
+            finished_at = datetime.now(timezone.utc)
+            status = outcome["status"]
+            final_target = body_position(m, d, BLOCK_BODIES[color])
+            success = status == "success"
+
+            grid_col, grid_row = grid_cell_indices(config, side, grid_index)
+            record = {
+                "trial_id": trial_id,
+                "color": color,
+                "side": side,
+                "grid_index": grid_index + 1,
+                "grid_col": grid_col,
+                "grid_row": grid_row,
+                "repeat": repeat,
+                "requested_xyz": requested_target.tolist(),
+                "settled_xyz": actual_target.tolist(),
+                "final_xyz": final_target.tolist(),
+                "prompt": prompt,
+                "condition": condition,
+                "grid_fingerprint": grid_fingerprint,
+                "status": status,
+                "success": success,
+                "steps": int(outcome["steps"]),
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "wall_seconds": (finished_at - started_at).total_seconds(),
+                "control_hz": CTRL_HZ,
+                "execution_length": OPEN_LOOP_HORIZON,
+            }
+            # BJ/IJ/CD/AVb on the 12 arm joints, for both the commanded action stream and the
+            # measured physical response. Written inline so results.jsonl alone is enough for
+            # the quantitative comparison; the NPZ is only needed to re-derive or plot them.
+            record["motion_metrics"] = compute_trial_metrics(executed_actions, measured_states)
+            if inference_ms:
+                record["inference_ms_mean"] = _json_float(np.mean(inference_ms))
+                record["inference_ms_max"] = _json_float(np.max(inference_ms))
+            record["num_chunks"] = len(predicted_chunks)
+            record["num_vls_chunks"] = int(sum(inference_used_vls))
+
+            artifact_stem = f"{condition}_{trial_id}"
+            if args.grid_record and video_frames:
+                video_path = output_dir / "videos" / f"{artifact_stem}.mp4"
+                save_video(video_path, video_frames)
+                record["video"] = str(video_path)
+            if args.grid_save_trajectories and executed_actions:
+                trajectory_path = output_dir / "trajectories" / f"{artifact_stem}.npz"
+                save_trajectory(
+                    trajectory_path,
+                    executed_actions=executed_actions,
+                    measured_states=measured_states,
+                    predicted_chunks=predicted_chunks,
+                    chunk_start_steps=chunk_start_steps,
+                    inference_states=inference_states,
+                    inference_ms=inference_ms,
+                    inference_used_vls=inference_used_vls,
+                    inference_chunk_indices=inference_chunk_indices,
+                    prompt=prompt,
+                    condition=condition,
+                )
+                record["trajectory"] = str(trajectory_path)
+            if capture_inputs and any(input_frame_buffers.values()):
+                input_root = pathlib.Path(args.record_inputs or (output_dir / "policy_inputs"))
+                input_path = input_root / artifact_stem
+                save_policy_input_videos(input_path, input_frame_buffers, flat=True)
+                record["policy_inputs"] = str(input_path)
+
+            append_jsonl(results_path, record)
+            action_metrics = record["motion_metrics"].get("action", {})
+            summary = "  ".join(
+                f"{key}={value:.4f}" if isinstance(value, float) else f"{key}=n/a"
+                for key, value in (
+                    ("BJ", action_metrics.get("BJ")),
+                    ("CD", action_metrics.get("CD")),
+                )
+            )
+            print(
+                f"[{ordinal:03d}/{len(trial_specs)}] {status.upper()} {trial_id} "
+                f"steps={outcome['steps']} final={final_target.round(4).tolist()} {summary}"
+            )
+            if status == "interrupted":
+                return
 
     try:
-        if wait_before_inference():
+        if args.grid_experiment:
+            run_grid_experiment()
+        elif wait_before_inference():
             loop_body()
     except KeyboardInterrupt:
         print("interrupted")
     finally:
         if ctx is not None:
             ctx.close()
-        if args.record and video_frames:
-            print(f"saving {len(video_frames)} frames -> {args.record}")
-            try:
-                import imageio
-                imageio.mimsave(args.record, video_frames, fps=CTRL_HZ)
-            except ImportError:
-                for i, fr in enumerate(video_frames):
-                    Image.fromarray(fr).save(args.record.replace(".mp4", f"_{i:04d}.png"))
-                print("(imageio not installed, saved as PNG sequence)")
-        if args.record_inputs:
+        if not args.grid_experiment and args.record and video_frames:
+            save_video(args.record, video_frames)
+        if not args.grid_experiment and args.record_inputs:
             save_policy_input_videos(args.record_inputs, input_frame_buffers)
-        if args.trajectory_out and executed_actions:
-            trajectory_path = pathlib.Path(args.trajectory_out)
-            trajectory_path.parent.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(
-                trajectory_path,
-                executed_actions=np.asarray(executed_actions, dtype=np.float64),
-                measured_qpos=np.asarray(measured_states, dtype=np.float64),
-                predicted_chunks=np.asarray(predicted_chunks, dtype=np.float64),
-                chunk_start_steps=np.asarray(chunk_start_steps, dtype=np.int64),
-                inference_states=np.asarray(inference_states, dtype=np.float64),
-                inference_ms=np.asarray(inference_ms, dtype=np.float64),
-                used_vls=np.asarray(inference_used_vls, dtype=bool),
-                chunk_indices=np.asarray(inference_chunk_indices, dtype=np.int64),
-                prompt=np.asarray(args.prompt),
-                condition=np.asarray("seam" if args.seam else "baseline"),
-                control_hz=np.asarray(CTRL_HZ, dtype=np.int64),
-                execution_length=np.asarray(OPEN_LOOP_HORIZON, dtype=np.int64),
+        if not args.grid_experiment and args.trajectory_out and executed_actions:
+            save_trajectory(
+                args.trajectory_out,
+                executed_actions=executed_actions,
+                measured_states=measured_states,
+                predicted_chunks=predicted_chunks,
+                chunk_start_steps=chunk_start_steps,
+                inference_states=inference_states,
+                inference_ms=inference_ms,
+                inference_used_vls=inference_used_vls,
+                inference_chunk_indices=inference_chunk_indices,
+                prompt=args.prompt,
+                condition="seam" if args.seam else "baseline",
             )
-            print(f"saving trajectory ({len(executed_actions)} executed steps) -> {trajectory_path}")
 
 
 if __name__ == "__main__":
