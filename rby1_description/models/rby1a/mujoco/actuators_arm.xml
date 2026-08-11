@@ -1,0 +1,39 @@
+<mujocoinclude>
+  <!-- The 26 position actuators of the RB-Y1, moved verbatim out of model.xml so
+       that model.xml and model_transport.xml share one definition.
+
+       ORDER IS PART OF THE INTERFACE: these occupy ctrl indices 0..25. Any root
+       model that adds more actuators must include this file FIRST and append
+       afterwards, so existing index-based code keeps working. -->
+  <position name="left_wheel_act" joint="left_wheel" />
+  <position name="right_wheel_act" joint="right_wheel" />
+
+  <position class="med"   name="link1_act" joint="torso_0" />
+  <position class="stiff" name="link2_act" joint="torso_1" />
+  <position class="stiff" name="link3_act" joint="torso_2" />
+  <position class="stiff" name="link4_act" joint="torso_3" />
+  <position class="med"   name="link5_act" joint="torso_4" />
+  <position           name="link6_act" joint="torso_5" />
+
+  <position class="med" name="left_arm_1_act" joint="left_arm_0" />
+  <position class="med" name="left_arm_2_act" joint="left_arm_1" />
+  <position name="left_arm_3_act" joint="left_arm_2" />
+  <position class="med" name="left_arm_4_act" joint="left_arm_3" />
+  <position name="left_arm_5_act" joint="left_arm_4" />
+  <position name="left_arm_6_act" joint="left_arm_5" />
+  <position name="left_arm_7_act" joint="left_arm_6" />
+
+  <position class="med" name="right_arm_1_act" joint="right_arm_0" />
+  <position class="med" name="right_arm_2_act" joint="right_arm_1" />
+  <position name="right_arm_3_act" joint="right_arm_2" />
+  <position class="med" name="right_arm_4_act" joint="right_arm_3" />
+  <position name="right_arm_5_act" joint="right_arm_4" />
+  <position name="right_arm_6_act" joint="right_arm_5" />
+  <position name="right_arm_7_act" joint="right_arm_6" />
+
+  <position name="head_0_act" joint="head_0" />
+  <position name="head_1_act" joint="head_1" />
+
+  <position name="gripper_r_act" joint="gripper_finger_r1" kp="1500" dampratio="1" inheritrange="1"/>
+  <position name="gripper_l_act" joint="gripper_finger_l1" kp="1500" dampratio="1" inheritrange="1"/>
+</mujocoinclude>

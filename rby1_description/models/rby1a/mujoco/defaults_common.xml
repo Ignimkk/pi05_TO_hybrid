@@ -1,0 +1,43 @@
+<mujocoinclude>
+  <!-- Shared <default> block for every RB-Y1 root model (model.xml,
+       model_transport.xml, ...). Extracted verbatim from model.xml so the two
+       roots cannot drift apart; the compiled result for model.xml is unchanged. -->
+  <default>
+    <!-- <position ctrlrange="-3000000 3000000" ctrllimited="true" /> -->
+    <position kp="1500" dampratio="1" inheritrange="1"/>
+    <default class="stiff"><position kp="6000" dampratio="1" inheritrange="1"/></default>
+    <default class="med">  <position kp="2000" dampratio="1" inheritrange="1"/></default>
+    <default class="visual">
+      <geom group="2" type="mesh" contype="0" conaffinity="0" />
+    </default>
+    <default class="collision">
+      <geom group="3" type="mesh" contype="1" conaffinity="0" />
+    </default>
+    <default class="in-model-collision">
+      <geom group="2" contype="0" conaffinity="0" rgba="0.3 0 0 0.0" />
+    </default>
+
+    <!-- ==================== scene prop classes ====================
+         Do NOT reuse class="collision" for scene objects. That class is
+         conaffinity="0", and the robot's finger geoms are conaffinity="0" too,
+         so MuJoCo's contact filter evaluates
+             (contype1 & conaffinity2) | (contype2 & conaffinity1)
+           = (1 & 0) | (1 & 0) = 0
+         i.e. a prop in that class can never touch the gripper. It also forces
+         type="mesh", which breaks primitive boxes/capsules.
+
+         Group 3 keeps the collision geoms hidden under the default viewer
+         options (geomgroup = [1,1,1,0,0,0]) while still being active, matching
+         the visual/collision split used by the robot model itself. -->
+    <!-- mass="0" matters: a geom with contype/conaffinity 0 still contributes
+         inertia. Without it the crate's cosmetic lattice shell alone adds ~6.5 kg
+         and swamps the collision model's ~0.8 kg. -->
+    <default class="prop_visual">
+      <geom group="2" contype="0" conaffinity="0" mass="0"/>
+    </default>
+    <default class="prop_collision">
+      <geom group="3" contype="1" conaffinity="1" condim="4"
+            friction="1.2 0.02 0.001" solimp="0.95 0.99 0.001 0.5 2"/>
+    </default>
+  </default>
+</mujocoinclude>
