@@ -1,0 +1,32 @@
+<mujocoinclude>
+  <!-- Project-owned procedural meshes. Regenerate with:
+       python scripts/generate_transport_prop_meshes.py -->
+  <material name="apple_skin" rgba="0.78 0.035 0.025 1" specular="0.24" shininess="0.28"/>
+  <material name="apple_stem_mat" rgba="0.24 0.105 0.035 1" specular="0.05" shininess="0.04"/>
+  <material name="apple_leaf_mat" rgba="0.10 0.34 0.055 1" specular="0.10" shininess="0.10"/>
+  <material name="banana_skin" rgba="0.96 0.72 0.055 1" specular="0.18" shininess="0.18"/>
+  <material name="banana_tip_mat" rgba="0.25 0.105 0.025 1" specular="0.05" shininess="0.04"/>
+  <material name="orange_skin" rgba="1.00 0.31 0.015 1" specular="0.16" shininess="0.14"/>
+  <material name="pear_skin" rgba="0.66 0.78 0.12 1" specular="0.15" shininess="0.12"/>
+
+  <mesh name="apple_visual_mesh" file="assets/transport_props/apple_visual.obj"/>
+  <mesh name="apple_stem_visual_mesh" file="assets/transport_props/apple_stem_visual.obj"/>
+  <mesh name="apple_leaf_visual_mesh" file="assets/transport_props/apple_leaf_visual.obj"/>
+  <mesh name="apple_collision_mesh" file="assets/transport_props/apple_collision.obj"/>
+
+  <mesh name="banana_visual_mesh" file="assets/transport_props/banana_visual.obj"/>
+  <mesh name="banana_tips_visual_mesh" file="assets/transport_props/banana_tips_visual.obj"/>
+  <mesh name="banana_collision_mesh_0" file="assets/transport_props/banana_collision_0.obj"/>
+  <mesh name="banana_collision_mesh_1" file="assets/transport_props/banana_collision_1.obj"/>
+  <mesh name="banana_collision_mesh_2" file="assets/transport_props/banana_collision_2.obj"/>
+  <mesh name="banana_collision_mesh_3" file="assets/transport_props/banana_collision_3.obj"/>
+  <mesh name="banana_collision_mesh_4" file="assets/transport_props/banana_collision_4.obj"/>
+
+  <mesh name="orange_visual_mesh" file="assets/transport_props/orange_visual.obj"/>
+  <mesh name="orange_calyx_visual_mesh" file="assets/transport_props/orange_calyx_visual.obj"/>
+  <mesh name="orange_collision_mesh" file="assets/transport_props/orange_collision.obj"/>
+
+  <mesh name="pear_visual_mesh" file="assets/transport_props/pear_visual.obj"/>
+  <mesh name="pear_stem_visual_mesh" file="assets/transport_props/pear_stem_visual.obj"/>
+  <mesh name="pear_collision_mesh" file="assets/transport_props/pear_collision.obj"/>
+</mujocoinclude>

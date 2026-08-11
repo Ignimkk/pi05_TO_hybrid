@@ -1,0 +1,25 @@
+<mujocoinclude>
+  <!-- Kinematic planar base actuators (ctrl indices 26, 27, 28).
+
+       rby1.xml already gives body "base" three planar DoFs - joint_x (slide x),
+       joint_y (slide y), joint_th (hinge z) - but leaves them unactuated, so the
+       robot cannot drive anywhere. These position servos close that loop.
+
+       They inherit armature="10" damping="30" range="-3.14 3.14" from rby1.xml's
+       default joint class.
+
+       REQUIRES the world<->base/wheel <contact><exclude> block in the root model.
+       Without it the base sits 2.6 mm inside the floor plane (it has no z DoF and
+       its collision mesh bottoms out at z=-0.003), producing ~249 kN of normal
+       force and ~12 kN of stiction - no gain can move it. With the excludes,
+       kp=20000 tracks a -90 deg turn plus a 1.4 m drive to under 0.1 mm.
+
+       Gains are sized for the ~60 kg base; dampratio="1" lets MuJoCo derive kv.
+
+       inheritrange="0" is required: the shared <position> default sets
+       inheritrange="1", and MuJoCo rejects a position actuator that declares both
+       inheritrange and an explicit ctrlrange. -->
+  <position name="base_x_act"   joint="joint_x"  kp="20000" dampratio="1" inheritrange="0" ctrlrange="-2.5 2.5"/>
+  <position name="base_y_act"   joint="joint_y"  kp="20000" dampratio="1" inheritrange="0" ctrlrange="-2.5 2.5"/>
+  <position name="base_yaw_act" joint="joint_th" kp="8000"  dampratio="1" inheritrange="0" ctrlrange="-3.14 3.14"/>
+</mujocoinclude>

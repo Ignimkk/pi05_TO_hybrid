@@ -1,0 +1,89 @@
+<mujoco model="rby1_transport">
+  <!-- impratio=10 is what makes the bimanual crate grasp hold.
+       At the default impratio=1 MuJoCo's tangential contact compliance lets the
+       crate creep out of the grippers at ~5 mm/s and drop within ~4 s of being
+       lifted, even standing perfectly still and even though every contact sits
+       well inside its friction cone. Stiffening friction relative to the normal
+       direction cuts that to 3.8 mm over 10 s. Measured: 1 -> drops at 4 s,
+       5 -> 8 mm creep, 10 -> 3.8 mm, 20 -> 3.4 mm.
+       Everything else matches model.xml so the two share solver behaviour. -->
+  <option timestep="0.002" solver="CG" iterations="30" tolerance="1e-6" impratio="10" />
+  <size nuserdata="144" />
+
+  <include file="./defaults_common.xml" />
+
+  <include file="./rby1.xml" />
+
+  <!-- Office room materials. Must sit in an <asset> block; MJCF merges multiple
+       <asset> sections, so this coexists with rby1.xml's own assets. -->
+  <asset>
+    <include file="scenes/office_assets.xml" />
+    <include file="scenes/transport_prop_assets.xml" />
+  </asset>
+
+  <worldbody>
+    <!-- ee_target boxes hidden by default (group=3); still exist as mocap bodies. -->
+    <body name="left_ee_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2" group="3"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
+    </body>
+    <body name="right_ee_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2" group="3"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
+    </body>
+    <include file="scenes/scene_transport.xml"/>
+  </worldbody>
+
+  <!-- CRITICAL for the mobile base.
+       Body "base" has no z DoF and its collision mesh bottoms out at z = -0.003,
+       so it is permanently 2.6 mm inside the floor plane. Measured steady-state
+       floor normal force without these excludes: ~249 kN, i.e. ~12.5 kN of
+       stiction even at the floor's mu = 0.05. The base actuators cannot move the
+       robot at any gain until the contacts are removed.
+
+       Only the "floor" geom lives on the world body, so table / shelf / crate
+       collisions are completely unaffected. The wheels must be excluded too:
+       they are held by position servos rather than free-spinning, so a wheel
+       touching the floor would drag. -->
+  <contact>
+    <exclude body1="world" body2="base"/>
+    <exclude body1="world" body2="wheel_r"/>
+    <exclude body1="world" body2="wheel_l"/>
+  </contact>
+
+  <keyframe>
+    <!-- 31 robot qpos + 5 freejoints x 7 = 66 values. MUST be complete: MuJoCo
+         pads a short keyframe with zeros and a unit quat, which would spawn every
+         free body at the world origin (inside the robot).
+
+         Robot order (from rby1.xml):
+           joint_x joint_y joint_th right_wheel left_wheel
+           torso_0..5
+           right_arm_0..6  gripper_finger_r1 gripper_finger_r2
+           left_arm_0..6   gripper_finger_l1 gripper_finger_l2
+           head_0 head_1
+         Free body order = declaration order in scenes/scene_transport.xml:
+           crate, apple, banana, orange, pear   (x y z qw qx qy qz each)
+
+         The 31 robot values are identical to model.xml's 'teleop' key, so the arm
+         poses / camera framing carry over from the block scenario unchanged. -->
+    <key name='teleop' qpos='0 0 0 0 0
+                             0 0 0 0 0 0
+                             -0.3 -0.3 -0.0 -1.95 -0.3 1.5 -1.57 0 0
+                             -0.3 0.3 -0.0 -1.95 0.3 1.5 -1.57 0 0
+                             0 0.7
+                             0.52 0.0 0.880 1 0 0 0
+                             0.46 -0.31 0.852 1 0 0 0
+                             0.46 0.31 0.842 1 0 0 0
+                             0.55 -0.31 0.850 1 0 0 0
+                             0.55 0.31 0.856 1 0 0 0'/>
+  </keyframe>
+
+  <actuator>
+    <!-- actuators_arm.xml MUST come first: it owns ctrl indices 0..25, which the
+         existing 14-D observation/action pipeline and all name-resolved ctrl
+         writes depend on. The base actuators append as 26/27/28. -->
+    <include file="./actuators_arm.xml" />
+    <include file="./actuators_base.xml" />
+  </actuator>
+</mujoco>

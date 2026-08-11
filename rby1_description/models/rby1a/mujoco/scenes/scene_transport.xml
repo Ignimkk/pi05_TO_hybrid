@@ -1,0 +1,321 @@
+<mujocoinclude>
+  <!-- ============================================================================
+       Transport scene: table + bimanual crate + small objects + shelf.
+       Worldbody fragment included by model_transport.xml.
+
+       FREE BODY DECLARATION ORDER IS PART OF THE INTERFACE.
+       Freejoint qpos blocks appear in joint-id order, i.e. the order the bodies
+       are declared here, appended after the 31 robot values:
+           crate (7) -> apple (7) -> banana (7) -> orange (7) -> pear (7)
+       Inserting a free body in the middle silently shifts every keyframe value
+       after it. transport_scene.py --self-check asserts the resulting map.
+
+       Collision geoms use class="prop_collision" (contype=1 conaffinity=1).
+       Do NOT use class="collision" here - see defaults_common.xml for why.
+       ============================================================================ -->
+
+
+  <!-- ============================================================================
+       Office room.
+
+       Purely a container for the task: the robot, table, crate and shelf all sit
+       inside it. Two things to know before editing:
+
+       * The FLOOR here is visual only. Physics still uses rby1.xml's "floor"
+         plane at z=0 (friction 0.05, condim 1), which the wheels roll on and
+         which model_transport.xml excludes from the base. This pad just covers
+         the default blue checkerboard with a carpet-tile look; its top sits 1 mm
+         above the physics plane, so anything resting on the ground appears to
+         sink by 1 mm - harmless, and worth it to avoid z-fighting.
+       * The WALLS are real collision geoms, so the robot cannot drive out of the
+         room. They are placed well clear of the workspace: the interior spans
+         x in [-2.9, 3.5], y in [-3.7, 3.1] while the furthest thing the robot
+         reaches is the shelf front at y = -1.40 and the dock at y = -0.95.
+         The base half-footprint is 0.34, so there is > 2.3 m of margin.
+       ============================================================================ -->
+  <body name="office" pos="0.3 -0.3 0">
+    <!-- Visual floor covering, 16 x 16 m so the default checkerboard is not
+         visible from any camera used by the scenarios. -->
+    <geom class="prop_visual" name="office_floor_pad" type="box" size="8 8 0.001"
+          pos="0 0 0" material="office_floor"/>
+
+    <!-- Walls: interior half-extents 3.2 (x) and 3.4 (y) -> 6.4 x 6.8 m room,
+         2.6 m tall, 50 mm thick. -->
+    <geom class="prop_collision" name="office_wall_px" type="box" size="0.025 3.45 1.3"
+          pos=" 3.225 0 1.3" material="office_wall" friction="0.6 0.005 0.001"/>
+    <geom class="prop_collision" name="office_wall_nx" type="box" size="0.025 3.45 1.3"
+          pos="-3.225 0 1.3" material="office_wall" friction="0.6 0.005 0.001"/>
+    <geom class="prop_collision" name="office_wall_py" type="box" size="3.25 0.025 1.3"
+          pos="0  3.425 1.3" material="office_wall" friction="0.6 0.005 0.001"/>
+    <geom class="prop_collision" name="office_wall_ny" type="box" size="3.25 0.025 1.3"
+          pos="0 -3.425 1.3" material="office_wall" friction="0.6 0.005 0.001"/>
+
+    <!-- Visual twins for the walls: the collision geoms above are group 3 and
+         therefore hidden by the viewer's default geomgroup. -->
+    <geom class="prop_visual" name="office_wall_px_vis" type="box" size="0.025 3.45 1.3"
+          pos=" 3.225 0 1.3" material="office_wall"/>
+    <geom class="prop_visual" name="office_wall_nx_vis" type="box" size="0.025 3.45 1.3"
+          pos="-3.225 0 1.3" material="office_wall"/>
+    <geom class="prop_visual" name="office_wall_py_vis" type="box" size="3.25 0.025 1.3"
+          pos="0  3.425 1.3" material="office_wall"/>
+    <geom class="prop_visual" name="office_wall_ny_vis" type="box" size="3.25 0.025 1.3"
+          pos="0 -3.425 1.3" material="office_wall"/>
+
+    <!-- Skirting boards. -->
+    <geom class="prop_visual" name="office_trim_px" type="box" size="0.008 3.45 0.06" pos=" 3.192 0 0.06" material="office_trim"/>
+    <geom class="prop_visual" name="office_trim_nx" type="box" size="0.008 3.45 0.06" pos="-3.192 0 0.06" material="office_trim"/>
+    <geom class="prop_visual" name="office_trim_py" type="box" size="3.25 0.008 0.06" pos="0  3.392 0.06" material="office_trim"/>
+    <geom class="prop_visual" name="office_trim_ny" type="box" size="3.25 0.008 0.06" pos="0 -3.392 0.06" material="office_trim"/>
+
+    <!-- Glazed partition along the +y wall, and a door on the -x wall. Flat
+         panels, visual only - enough to read as an office without adding geometry
+         the planner has to care about. -->
+    <geom class="prop_visual" name="office_window_0" type="box" size="0.62 0.006 0.55" pos="-2.10 3.397 1.45" material="office_glass"/>
+    <geom class="prop_visual" name="office_window_1" type="box" size="0.62 0.006 0.55" pos="-0.70 3.397 1.45" material="office_glass"/>
+    <geom class="prop_visual" name="office_window_2" type="box" size="0.62 0.006 0.55" pos=" 0.70 3.397 1.45" material="office_glass"/>
+    <geom class="prop_visual" name="office_window_3" type="box" size="0.62 0.006 0.55" pos=" 2.10 3.397 1.45" material="office_glass"/>
+    <geom class="prop_visual" name="office_mullion_0" type="box" size="0.02 0.008 0.58" pos="-1.40 3.394 1.45" material="office_trim"/>
+    <geom class="prop_visual" name="office_mullion_1" type="box" size="0.02 0.008 0.58" pos=" 0.00 3.394 1.45" material="office_trim"/>
+    <geom class="prop_visual" name="office_mullion_2" type="box" size="0.02 0.008 0.58" pos=" 1.40 3.394 1.45" material="office_trim"/>
+    <geom class="prop_visual" name="office_door_leaf" type="box" size="0.008 0.45 1.02" pos="-3.192 -1.30 1.02" material="office_door"/>
+    <geom class="prop_visual" name="office_door_frame_a" type="box" size="0.010 0.03 1.05" pos="-3.190 -0.82 1.05" material="office_trim"/>
+    <geom class="prop_visual" name="office_door_frame_b" type="box" size="0.010 0.03 1.05" pos="-3.190 -1.78 1.05" material="office_trim"/>
+    <geom class="prop_visual" name="office_door_frame_c" type="box" size="0.010 0.51 0.03" pos="-3.190 -1.30 2.07" material="office_trim"/>
+  </body>
+
+  <!-- Interior lighting. No visible fixtures: the room has no ceiling, so lamp
+       panels would float in mid-air. castshadow="false" everywhere, matching
+       rby1.xml's own light - shadow casting from four sources makes the table
+       read as muddy and costs render time on every logged camera frame. -->
+  <light name="office_light_0" pos="-1.30 -2.00 2.5" dir="0 0 -1" directional="false"
+         diffuse="0.50 0.50 0.48" specular="0.05 0.05 0.05" castshadow="false"/>
+  <light name="office_light_1" pos=" 1.90 -2.00 2.5" dir="0 0 -1" directional="false"
+         diffuse="0.50 0.50 0.48" specular="0.05 0.05 0.05" castshadow="false"/>
+  <light name="office_light_2" pos="-1.30  1.40 2.5" dir="0 0 -1" directional="false"
+         diffuse="0.42 0.42 0.40" specular="0.05 0.05 0.05" castshadow="false"/>
+  <light name="office_light_3" pos=" 1.90  1.40 2.5" dir="0 0 -1" directional="false"
+         diffuse="0.42 0.42 0.40" specular="0.05 0.05 0.05" castshadow="false"/>
+
+  <!-- ===== Table: geometry identical to scene_blocks.xml. Top surface z = 0.82. =====
+       Deliberately unchanged so the two scenes share the same work surface. -->
+  <body name="table" pos="0.65 0 0">
+    <geom name="table_top" type="box" size="0.25 0.4 0.02" pos="0 0 0.80"
+          rgba="0.72 0.55 0.36 1" friction="1 0.005 0.001"/>
+
+    <geom name="table_leg_fl" type="box" size="0.02 0.02 0.40" pos=" 0.23  0.38 0.40" rgba="0.4 0.3 0.2 1"/>
+    <geom name="table_leg_fr" type="box" size="0.02 0.02 0.40" pos=" 0.23 -0.38 0.40" rgba="0.4 0.3 0.2 1"/>
+    <geom name="table_leg_bl" type="box" size="0.02 0.02 0.40" pos="-0.23  0.38 0.40" rgba="0.4 0.3 0.2 1"/>
+    <geom name="table_leg_br" type="box" size="0.02 0.02 0.40" pos="-0.23 -0.38 0.40" rgba="0.4 0.3 0.2 1"/>
+  </body>
+
+  <!-- ===== Multipurpose transport crate =====
+       Outer 0.18 (x) x 0.30 (y) x 0.12 (z); interior 0.164 x 0.284 x 0.112.
+       Body origin at table_top + half_height = 0.82 + 0.06 = 0.88.
+       Footprint x in [0.43, 0.61], inside the table (x in [0.40, 0.90]) and inside
+       the ~0.58 m arm reach at grasp height, which is why it sits at the near edge.
+
+       Mass comes from geom density (~0.8 kg total). Never hand-write <inertial>
+       here: a guessed diaginertia makes the body diverge/NaN. -->
+  <body name="crate" pos="0.52 0 0.88">
+    <freejoint name="crate_free"/>
+
+    <geom class="prop_collision" name="crate_floor"   type="box" size="0.090 0.150 0.004" pos="0 0 -0.056"
+          density="500" rgba="0.62 0.44 0.26 1"/>
+    <geom class="prop_collision" name="crate_wall_px" type="box" size="0.004 0.150 0.056" pos=" 0.086 0      0.004"
+          density="500" rgba="0.62 0.44 0.26 1"/>
+    <geom class="prop_collision" name="crate_wall_nx" type="box" size="0.004 0.150 0.056" pos="-0.086 0      0.004"
+          density="500" rgba="0.62 0.44 0.26 1"/>
+    <geom class="prop_collision" name="crate_wall_py" type="box" size="0.090 0.004 0.056" pos=" 0      0.146 0.004"
+          density="500" rgba="0.62 0.44 0.26 1"/>
+    <geom class="prop_collision" name="crate_wall_ny" type="box" size="0.090 0.004 0.056" pos=" 0     -0.146 0.004"
+          density="500" rgba="0.62 0.44 0.26 1"/>
+
+    <!-- Handles at |y| = 0.200, 0.085 above the crate origin = 25 mm above the rim.
+         A horizontal rail with NOTHING above it: a tall vertical plate makes the
+         bulky EE_BODY wrist clip the handle on the 49-degree tilted descent.
+
+         The bars are axis-aligned with the crate, square to their posts. An
+         earlier version yawed them 11.3 deg to match the gripper's closing axis,
+         on the theory that flat pads meeting a flat bar edge-on was what let the
+         crate creep out of the grippers. That was the wrong diagnosis - the real
+         cause was MuJoCo's tangential contact compliance, fixed by impratio=10
+         in model_transport.xml - and the yaw only made the handle look bent
+         relative to its posts. Removing it costs nothing: measured creep while
+         held stationary is 7.6 mm over 12 s, nowhere near losing the crate.
+         (A round rail was also tried and is much worse: a cylinder squirts out
+         from between two flat pads immediately.)
+
+         16 mm thick, far inside the 86.4 mm maximum opening, so the fingers close
+         a long way and press hard. The posts at x = +-0.058 act as end stops. -->
+    <geom class="prop_collision" name="handle_bar_l"  type="box" size="0.050 0.008 0.012"
+          pos=" 0     0.200 0.085" density="500" friction="1.5 0.05 0.002" rgba="0.15 0.15 0.18 1"/>
+    <geom class="prop_collision" name="handle_bar_r"  type="box" size="0.050 0.008 0.012"
+          pos=" 0    -0.200 0.085" density="500" friction="1.5 0.05 0.002" rgba="0.15 0.15 0.18 1"/>
+    <geom class="prop_collision" name="handle_post_lp" type="box" size="0.008 0.010 0.030" pos=" 0.058  0.200 0.043"
+          density="500" rgba="0.15 0.15 0.18 1"/>
+    <geom class="prop_collision" name="handle_post_ln" type="box" size="0.008 0.010 0.030" pos="-0.058  0.200 0.043"
+          density="500" rgba="0.15 0.15 0.18 1"/>
+    <geom class="prop_collision" name="handle_post_rp" type="box" size="0.008 0.010 0.030" pos=" 0.058 -0.200 0.043"
+          density="500" rgba="0.15 0.15 0.18 1"/>
+    <geom class="prop_collision" name="handle_post_rn" type="box" size="0.008 0.010 0.030" pos="-0.058 -0.200 0.043"
+          density="500" rgba="0.15 0.15 0.18 1"/>
+    <!-- Structural tie between the handle posts and the crate wall. Kept low
+         (top at local z = 0.027) and inboard of the bar so it never blocks the
+         fingers, which reach down to about local z = 0.017 on a centred grasp. -->
+    <geom class="prop_collision" name="handle_arm_l"  type="box" size="0.066 0.025 0.007" pos=" 0     0.175 0.020"
+          density="500" rgba="0.15 0.15 0.18 1"/>
+    <geom class="prop_collision" name="handle_arm_r"  type="box" size="0.066 0.025 0.007" pos=" 0    -0.175 0.020"
+          density="500" rgba="0.15 0.15 0.18 1"/>
+
+    <!-- ===== Visual shell (group 2, contype/conaffinity/mass 0) =====
+         The collision geoms above live in group 3, which the default viewer
+         option (geomgroup = [1,1,1,0,0,0]) HIDES, so every prop needs a visual
+         twin or it renders as nothing at all. These mirror the collision walls
+         one-for-one instead of a single translucent block, so the open top, the
+         wall thickness and the handles all read correctly on camera.  -->
+    <geom class="prop_visual" name="crate_vis_floor"   type="box" size="0.090 0.150 0.004" pos="0 0 -0.056" rgba="0.68 0.49 0.29 1"/>
+    <geom class="prop_visual" name="crate_vis_wall_px" type="box" size="0.004 0.150 0.056" pos=" 0.086 0     0.004" rgba="0.72 0.53 0.32 1"/>
+    <geom class="prop_visual" name="crate_vis_wall_nx" type="box" size="0.004 0.150 0.056" pos="-0.086 0     0.004" rgba="0.72 0.53 0.32 1"/>
+    <geom class="prop_visual" name="crate_vis_wall_py" type="box" size="0.090 0.004 0.056" pos=" 0     0.146 0.004" rgba="0.72 0.53 0.32 1"/>
+    <geom class="prop_visual" name="crate_vis_wall_ny" type="box" size="0.090 0.004 0.056" pos=" 0    -0.146 0.004" rgba="0.72 0.53 0.32 1"/>
+
+    <!-- Rim as a FRAME of four bars, not a plate: a solid top would make the
+         crate look like a closed box and hide that objects go inside it. -->
+    <geom class="prop_visual" name="crate_vis_rim_px" type="box" size="0.006 0.152 0.005" pos=" 0.086 0     0.062" rgba="0.42 0.28 0.15 1"/>
+    <geom class="prop_visual" name="crate_vis_rim_nx" type="box" size="0.006 0.152 0.005" pos="-0.086 0     0.062" rgba="0.42 0.28 0.15 1"/>
+    <geom class="prop_visual" name="crate_vis_rim_py" type="box" size="0.092 0.006 0.005" pos=" 0     0.146 0.062" rgba="0.42 0.28 0.15 1"/>
+    <geom class="prop_visual" name="crate_vis_rim_ny" type="box" size="0.092 0.006 0.005" pos=" 0    -0.146 0.062" rgba="0.42 0.28 0.15 1"/>
+
+    <!-- Lattice slats on the long faces. -->
+    <geom class="prop_visual" name="crate_vis_slat_ny_0" type="box" size="0.004 0.006 0.052" pos="-0.045 -0.150 0.004" rgba="0.42 0.28 0.15 1"/>
+    <geom class="prop_visual" name="crate_vis_slat_ny_1" type="box" size="0.004 0.006 0.052" pos=" 0.000 -0.150 0.004" rgba="0.42 0.28 0.15 1"/>
+    <geom class="prop_visual" name="crate_vis_slat_ny_2" type="box" size="0.004 0.006 0.052" pos=" 0.045 -0.150 0.004" rgba="0.42 0.28 0.15 1"/>
+    <geom class="prop_visual" name="crate_vis_slat_py_0" type="box" size="0.004 0.006 0.052" pos="-0.045  0.150 0.004" rgba="0.42 0.28 0.15 1"/>
+    <geom class="prop_visual" name="crate_vis_slat_py_1" type="box" size="0.004 0.006 0.052" pos=" 0.000  0.150 0.004" rgba="0.42 0.28 0.15 1"/>
+    <geom class="prop_visual" name="crate_vis_slat_py_2" type="box" size="0.004 0.006 0.052" pos=" 0.045  0.150 0.004" rgba="0.42 0.28 0.15 1"/>
+
+    <!-- Handle twins. Dark so the graspable rail stands out from the crate body. -->
+    <geom class="prop_visual" name="handle_vis_bar_l"  type="box" size="0.050 0.008 0.012" pos=" 0  0.200 0.085" rgba="0.13 0.13 0.16 1"/>
+    <geom class="prop_visual" name="handle_vis_bar_r"  type="box" size="0.050 0.008 0.012" pos=" 0 -0.200 0.085" rgba="0.13 0.13 0.16 1"/>
+    <geom class="prop_visual" name="handle_vis_post_lp" type="box" size="0.008 0.010 0.030" pos=" 0.058  0.200 0.043" rgba="0.13 0.13 0.16 1"/>
+    <geom class="prop_visual" name="handle_vis_post_ln" type="box" size="0.008 0.010 0.030" pos="-0.058  0.200 0.043" rgba="0.13 0.13 0.16 1"/>
+    <geom class="prop_visual" name="handle_vis_post_rp" type="box" size="0.008 0.010 0.030" pos=" 0.058 -0.200 0.043" rgba="0.13 0.13 0.16 1"/>
+    <geom class="prop_visual" name="handle_vis_post_rn" type="box" size="0.008 0.010 0.030" pos="-0.058 -0.200 0.043" rgba="0.13 0.13 0.16 1"/>
+    <geom class="prop_visual" name="handle_vis_arm_l"  type="box" size="0.066 0.025 0.007" pos=" 0  0.175 0.020" rgba="0.13 0.13 0.16 1"/>
+    <geom class="prop_visual" name="handle_vis_arm_r"  type="box" size="0.066 0.025 0.007" pos=" 0 -0.175 0.020" rgba="0.13 0.13 0.16 1"/>
+
+    <site name="handle_l_site"  pos=" 0 0.200 0.085" size="0.008" group="4" rgba="0 1 0 1"/>
+    <site name="handle_r_site"  pos=" 0 -0.200 0.085" size="0.008" group="4" rgba="0 1 0 1"/>
+    <site name="crate_center"   pos=" 0 0 0"          size="0.008" group="4"/>
+    <site name="crate_interior" pos=" 0 0 0.004"      size="0.008" group="4"/>
+  </body>
+
+  <!-- ===== Small objects =====
+       Spawned at |y| ~ 0.31, well outside the crate. The handle bars only reach
+       |y| = 0.21, but the forearm is far wider than the fingers: descending at
+       |y| <= 0.28 fouls the handle assembly and leaves 50-80 mm of tracking
+       error, enough to sweep the object away before the gripper closes.
+       See scene_utils.TRANSPORT_SMALL_OBJ_REACH for the measurements. -->
+  <body name="apple" pos="0.46 -0.31 0.852">
+    <freejoint name="apple_free"/>
+    <!-- Explicit inertia keeps the old 130 g dynamics independent of visual
+         tessellation and of the collision hull's vertex density. -->
+    <inertial pos="0 0 0" mass="0.130" diaginertia="0.000050 0.000050 0.000053"/>
+    <geom class="prop_collision" name="apple_geom" type="mesh" mesh="apple_collision_mesh"
+          mass="0" friction="1.0 0.01 0.001" rgba="0.78 0.035 0.025 0.25"/>
+    <geom class="prop_visual" name="apple_vis" type="mesh" mesh="apple_visual_mesh"
+          material="apple_skin"/>
+    <geom class="prop_visual" name="apple_stem" type="mesh" mesh="apple_stem_visual_mesh"
+          material="apple_stem_mat"/>
+    <geom class="prop_visual" name="apple_leaf" type="mesh" mesh="apple_leaf_visual_mesh"
+          material="apple_leaf_mat"/>
+  </body>
+
+  <!-- Long axis along world X, i.e. ACROSS the gripper's closing direction.
+       Rotated 90 degrees the pads press near the tapered ends and flick it away. -->
+  <body name="banana" pos="0.46 0.31 0.842">
+    <freejoint name="banana_free"/>
+    <inertial pos="0 0 0" mass="0.084" diaginertia="0.000020 0.000053 0.000053"/>
+    <!-- Five overlapping convex meshes follow the bend while retaining nearly
+         flat Y faces for stable pad contact. A single banana mesh would be
+         convexified by MuJoCo and lose the useful curvature. -->
+    <geom class="prop_collision" name="banana_geom_0" type="mesh" mesh="banana_collision_mesh_0"
+          mass="0" friction="1.0 0.01 0.001" rgba="0.96 0.72 0.055 0.25"/>
+    <geom class="prop_collision" name="banana_geom_1" type="mesh" mesh="banana_collision_mesh_1"
+          mass="0" friction="1.0 0.01 0.001" rgba="0.96 0.72 0.055 0.25"/>
+    <geom class="prop_collision" name="banana_geom_2" type="mesh" mesh="banana_collision_mesh_2"
+          mass="0" friction="1.0 0.01 0.001" rgba="0.96 0.72 0.055 0.25"/>
+    <geom class="prop_collision" name="banana_geom_3" type="mesh" mesh="banana_collision_mesh_3"
+          mass="0" friction="1.0 0.01 0.001" rgba="0.96 0.72 0.055 0.25"/>
+    <geom class="prop_collision" name="banana_geom_4" type="mesh" mesh="banana_collision_mesh_4"
+          mass="0" friction="1.0 0.01 0.001" rgba="0.96 0.72 0.055 0.25"/>
+    <geom class="prop_visual" name="banana_vis" type="mesh" mesh="banana_visual_mesh"
+          material="banana_skin"/>
+    <geom class="prop_visual" name="banana_tips" type="mesh" mesh="banana_tips_visual_mesh"
+          material="banana_tip_mat"/>
+  </body>
+
+  <body name="orange" pos="0.55 -0.31 0.850">
+    <freejoint name="orange_free"/>
+    <inertial pos="0 0 0" mass="0.160" diaginertia="0.000060 0.000060 0.000060"/>
+    <geom class="prop_collision" name="orange_geom" type="mesh" mesh="orange_collision_mesh"
+          mass="0" friction="1.0 0.01 0.001" rgba="1.00 0.31 0.015 0.25"/>
+    <geom class="prop_visual" name="orange_vis" type="mesh" mesh="orange_visual_mesh"
+          material="orange_skin"/>
+    <geom class="prop_visual" name="orange_calyx" type="mesh" mesh="orange_calyx_visual_mesh"
+          material="apple_leaf_mat"/>
+  </body>
+
+  <body name="pear" pos="0.55 0.31 0.856">
+    <freejoint name="pear_free"/>
+    <inertial pos="0 0 -0.004" mass="0.150" diaginertia="0.000074 0.000074 0.000061"/>
+    <geom class="prop_collision" name="pear_geom" type="mesh" mesh="pear_collision_mesh"
+          mass="0" friction="1.0 0.01 0.001" rgba="0.66 0.78 0.12 0.25"/>
+    <geom class="prop_visual" name="pear_vis" type="mesh" mesh="pear_visual_mesh"
+          material="pear_skin"/>
+    <geom class="prop_visual" name="pear_stem" type="mesh" mesh="pear_stem_visual_mesh"
+          material="apple_stem_mat"/>
+  </body>
+
+  <!-- ===== Shelf =====
+       Boards at z = 0.35 / 0.70 / 1.00. Uprights and back stop AT 1.00 so the top
+       board is open from above. The gripper plus wrist extends ~0.25 m above the
+       crate top, so inserting into a level that has a board above it needs ~0.45 m
+       of vertical clearance - only the TOP level is placeable; the lower boards are
+       visual distractors / storage.
+
+       Default pose (0, -1.55) puts the shelf beside the table on -Y. The robot
+       yaws -90 deg and drives to the dock pose (0, -0.95, -pi/2); its front edge
+       then sits at y = -1.28 against the shelf front face at y = -1.40. -->
+  <body name="shelf" pos="0 -1.55 0">
+    <geom class="prop_collision" name="shelf_back"    type="box" size="0.300 0.015 0.500" pos="0 -0.135 0.500"
+          friction="1 0.005 0.001" rgba="0.55 0.40 0.28 1"/>
+    <geom class="prop_collision" name="shelf_side_p"  type="box" size="0.015 0.150 0.500" pos=" 0.285 0 0.500"
+          friction="1 0.005 0.001" rgba="0.55 0.40 0.28 1"/>
+    <geom class="prop_collision" name="shelf_side_n"  type="box" size="0.015 0.150 0.500" pos="-0.285 0 0.500"
+          friction="1 0.005 0.001" rgba="0.55 0.40 0.28 1"/>
+    <geom class="prop_collision" name="shelf_board_0" type="box" size="0.300 0.150 0.012" pos="0 0 0.338"
+          friction="1 0.005 0.001" rgba="0.60 0.45 0.30 1"/>
+    <geom class="prop_collision" name="shelf_board_1" type="box" size="0.300 0.150 0.012" pos="0 0 0.688"
+          friction="1 0.005 0.001" rgba="0.60 0.45 0.30 1"/>
+    <geom class="prop_collision" name="shelf_board_2" type="box" size="0.300 0.150 0.012" pos="0 0 0.988"
+          friction="1 0.005 0.001" rgba="0.60 0.45 0.30 1"/>
+
+    <!-- ===== Visual twins =====
+         Without these the shelf renders as nothing: every geom above is in
+         group 3, which the default viewer geomgroup [1,1,1,0,0,0] hides. Sizes
+         and positions mirror the collision boxes exactly. The target board is
+         tinted so the goal level is obvious on camera. -->
+    <geom class="prop_visual" name="shelf_vis_back"    type="box" size="0.300 0.015 0.500" pos="0 -0.135 0.500" rgba="0.52 0.38 0.26 1"/>
+    <geom class="prop_visual" name="shelf_vis_side_p"  type="box" size="0.015 0.150 0.500" pos=" 0.285 0 0.500" rgba="0.58 0.43 0.29 1"/>
+    <geom class="prop_visual" name="shelf_vis_side_n"  type="box" size="0.015 0.150 0.500" pos="-0.285 0 0.500" rgba="0.58 0.43 0.29 1"/>
+    <geom class="prop_visual" name="shelf_vis_board_0" type="box" size="0.300 0.150 0.012" pos="0 0 0.338" rgba="0.64 0.48 0.32 1"/>
+    <geom class="prop_visual" name="shelf_vis_board_1" type="box" size="0.300 0.150 0.012" pos="0 0 0.688" rgba="0.64 0.48 0.32 1"/>
+    <geom class="prop_visual" name="shelf_vis_board_2" type="box" size="0.300 0.150 0.012" pos="0 0 0.988" rgba="0.30 0.55 0.62 1"/>
+
+    <!-- Goal sites: surface of each board, nudged toward the open (+Y) face. -->
+    <site name="shelf_level_0_site" pos="0 0.03 0.350" size="0.010" group="4" rgba="0 1 1 0.5"/>
+    <site name="shelf_level_1_site" pos="0 0.03 0.700" size="0.010" group="4" rgba="0 1 1 0.5"/>
+    <site name="shelf_level_2_site" pos="0 0.03 1.000" size="0.010" group="4" rgba="0 1 1 1"/>
+  </body>
+</mujocoinclude>

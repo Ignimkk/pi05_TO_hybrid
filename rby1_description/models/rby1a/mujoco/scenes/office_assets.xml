@@ -1,0 +1,20 @@
+<mujocoinclude>
+  <!-- Materials for the office room in scene_transport.xml.
+       Included inside the root model's <asset> block.
+
+       NOTE: no <texture type="skybox"> here on purpose. rby1.xml already declares
+       one and MuJoCo allows exactly one skybox per model; adding a second is a
+       compile error. The room's walls are what sell the interior look. -->
+
+  <!-- Carpet-tile floor. texrepeat 24 over the 12 m pad gives 0.5 m tiles. -->
+  <texture name="office_floor_tex" type="2d" builtin="checker" width="512" height="512"
+           rgb1="0.74 0.72 0.68" rgb2="0.68 0.66 0.62"/>
+  <material name="office_floor" texture="office_floor_tex" texrepeat="24 24" texuniform="true"
+            specular="0.12" shininess="0.08" reflectance="0.04"/>
+
+  <material name="office_wall"  rgba="0.895 0.885 0.860 1" specular="0.04" shininess="0.02"/>
+  <material name="office_trim"  rgba="0.33 0.34 0.37 1"    specular="0.10" shininess="0.10"/>
+  <material name="office_glass" rgba="0.55 0.68 0.76 0.45" specular="0.60" shininess="0.60"/>
+  <material name="office_door"  rgba="0.52 0.40 0.29 1"    specular="0.10" shininess="0.10"/>
+  <material name="office_panel" rgba="0.97 0.97 0.94 1"    specular="0.05" shininess="0.05"/>
+</mujocoinclude>
