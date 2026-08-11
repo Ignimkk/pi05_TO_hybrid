@@ -43,11 +43,29 @@ import pyarrow.parquet as pq
 CAMERAS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 CHUNK_SIZE = 1000  # episodes per chunk directory (LeRobot default)
 
+# Schema registry. "rby1_14" is the original fixed-arm layout and stays the
+# default, so every existing caller writes byte-identical datasets. The mobile
+# scenarios opt into "rby1_17_mobile", whose first 14 entries are the same
+# quantities in the same order, with the planar base pose appended.
+_ARM14 = [
+    "left_arm_0", "left_arm_1", "left_arm_2", "left_arm_3", "left_arm_4", "left_arm_5",
+    "left_gripper",
+    "right_arm_0", "right_arm_1", "right_arm_2", "right_arm_3", "right_arm_4", "right_arm_5",
+    "right_gripper",
+]
+SCHEMAS = {
+    "rby1_14": {"dim": 14, "names": _ARM14, "robot_type": "rby1"},
+    "rby1_17_mobile": {"dim": 17,
+                       "names": _ARM14 + ["base_x", "base_y", "base_yaw"],
+                       "robot_type": "rby1_mobile"},
+}
+DEFAULT_SCHEMA = "rby1_14"
+
 
 @dataclass
 class Frame:
-    state: np.ndarray                      # (14,) float32
-    action: np.ndarray                     # (14,) float32
+    state: np.ndarray                      # (14,) or (17,) float32, per writer schema
+    action: np.ndarray                     # same shape as state
     images: Dict[str, np.ndarray]          # cam name -> HxWx3 uint8
     timestamp: float
     frame_index: int
@@ -79,7 +97,14 @@ class LeRobotWriter:
     """
 
     def __init__(self, root: str | pathlib.Path, *, fps: int,
-                 image_wh: tuple[int, int]):
+                 image_wh: tuple[int, int], schema: str = DEFAULT_SCHEMA):
+        if schema not in SCHEMAS:
+            raise ValueError(f"unknown schema {schema!r}; known: {sorted(SCHEMAS)}")
+        spec = SCHEMAS[schema]
+        self.schema = schema
+        self.state_dim = spec["dim"]
+        self.feature_names = spec["names"]
+        self.robot_type = spec["robot_type"]
         self.root = pathlib.Path(root)
         self.fps = fps
         self.image_w, self.image_h = image_wh
@@ -134,6 +159,12 @@ class LeRobotWriter:
         # new_episode() (e.g. adding a "[FAIL] " prefix for failed episodes).
         if ep.task not in self._task_to_index:
             self._task_to_index[ep.task] = len(self._task_to_index)
+        first = ep.frames[0]
+        for name, arr in (("state", first.state), ("action", first.action)):
+            if arr.shape != (self.state_dim,):
+                raise ValueError(
+                    f"{name} has shape {arr.shape}, but schema {self.schema!r} "
+                    f"expects ({self.state_dim},)")
         self._write_parquet(ep)
         self._write_videos(ep)
         self._episodes_written.append({
@@ -164,8 +195,10 @@ class LeRobotWriter:
         next_reward  = np.zeros(n, dtype=np.float32)
 
         table = pa.table({
-            "observation.state": pa.array(state.tolist(),  type=pa.list_(pa.float32(), 14)),
-            "action":            pa.array(action.tolist(), type=pa.list_(pa.float32(), 14)),
+            "observation.state": pa.array(state.tolist(),
+                                          type=pa.list_(pa.float32(), self.state_dim)),
+            "action":            pa.array(action.tolist(),
+                                          type=pa.list_(pa.float32(), self.state_dim)),
             "timestamp":         pa.array(timestamp),
             "frame_index":       pa.array(frame_index),
             "episode_index":     pa.array(episode_idx),
@@ -193,7 +226,7 @@ class LeRobotWriter:
     def _write_info(self) -> None:
         info = {
             "codebase_version": "v2.0",
-            "robot_type": "rby1",
+            "robot_type": self.robot_type,
             "total_episodes": len(self._episodes_written),
             "total_frames": sum(e["length"] for e in self._episodes_written),
             "total_tasks": len(self._task_to_index),
@@ -223,14 +256,10 @@ class LeRobotWriter:
         }
         return {
             **images,
-            "observation.state": {"dtype": "float32", "shape": [14], "names": [
-                "left_arm_0","left_arm_1","left_arm_2","left_arm_3","left_arm_4","left_arm_5","left_gripper",
-                "right_arm_0","right_arm_1","right_arm_2","right_arm_3","right_arm_4","right_arm_5","right_gripper",
-            ]},
-            "action": {"dtype": "float32", "shape": [14], "names": [
-                "left_arm_0","left_arm_1","left_arm_2","left_arm_3","left_arm_4","left_arm_5","left_gripper",
-                "right_arm_0","right_arm_1","right_arm_2","right_arm_3","right_arm_4","right_arm_5","right_gripper",
-            ]},
+            "observation.state": {"dtype": "float32", "shape": [self.state_dim],
+                                  "names": list(self.feature_names)},
+            "action": {"dtype": "float32", "shape": [self.state_dim],
+                       "names": list(self.feature_names)},
             "timestamp":     {"dtype": "float32", "shape": [1], "names": ["timestamp"]},
             "frame_index":   {"dtype": "int64",   "shape": [1], "names": ["frame_index"]},
             "episode_index": {"dtype": "int64",   "shape": [1], "names": ["episode_index"]},
