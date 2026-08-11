@@ -30,19 +30,39 @@ import numpy as np
 RIGHT_ARM_REACH = dict(x=(0.45, 0.60), y=(-0.32, -0.15))
 LEFT_ARM_REACH  = dict(x=(0.45, 0.60), y=( 0.15,  0.32))
 
-# Freejoint qpos start indices in the RBY1 model (they are the last 3 freejoints).
-# Populated at first call to _freejoint_qadr_map().
-_FREE_QADR_CACHE: Dict[str, int] = {}
+# Spawn envelope for the fruit props in the transport scene.
+# Symmetric in y and used for both arms.
+#
+# The lower bound is set by the CRATE, not by reach. The handle bars only reach
+# |y| = 0.21, but the forearm and wrist are much wider than the fingers: a
+# top-down descent at |y| <= 0.28 fouls the handle assembly and leaves 50-80 mm
+# of tracking error, which is enough to sweep a 50 mm apple off its spot before
+# the gripper ever closes. Measured executed descend error at x = 0.50:
+# |y| = 0.20 -> 71 mm, 0.24 -> 79 mm, 0.28 -> 51 mm, 0.32 -> 9 mm.
+# The upper bound keeps the object on the table (half-width 0.40) with room for
+# its own radius.
+TRANSPORT_SMALL_OBJ_REACH = dict(x=(0.44, 0.56), y=(0.29, 0.34))
+
+# Freejoint name -> qpos start index, cached per model.
+# Keyed by id(model) and validated against the stored MjModel reference, because
+# CPython recycles ids: holding the reference both pins the id and lets us detect
+# a stale entry. Caching by name alone was wrong as soon as a process loaded two
+# different models (e.g. model.xml and model_transport.xml), since the second
+# lookup silently returned the first model's addresses.
+_FREE_QADR_CACHE: Dict[int, Tuple[mujoco.MjModel, Dict[str, int]]] = {}
 
 
 def _freejoint_qadr_map(model: mujoco.MjModel) -> Dict[str, int]:
-    if _FREE_QADR_CACHE:
-        return _FREE_QADR_CACHE
-    for j in range(model.njnt):
-        if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE:
-            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j)
-            _FREE_QADR_CACHE[name] = model.jnt_qposadr[j]
-    return _FREE_QADR_CACHE
+    entry = _FREE_QADR_CACHE.get(id(model))
+    if entry is not None and entry[0] is model:
+        return entry[1]
+    mapping = {
+        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j): int(model.jnt_qposadr[j])
+        for j in range(model.njnt)
+        if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE
+    }
+    _FREE_QADR_CACHE[id(model)] = (model, mapping)
+    return mapping
 
 
 def set_block_pose(model: mujoco.MjModel, data: mujoco.MjData,

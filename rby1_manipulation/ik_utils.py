@@ -46,6 +46,20 @@ GRIPPER_L_JOINT = "gripper_finger_l1"
 GRIPPER_OPEN   = -0.045
 GRIPPER_CLOSED = 0.0
 
+# Clear gap between the finger pads as a function of the actuated joint value:
+#   finger body separation = 0.006 + 2*|q|,  pad half-thickness = 0.0048 each
+#   => gap(q) = 2*|q| - 0.0036
+# At the joint limit q = -0.05 that is 96.4 mm; at GRIPPER_OPEN it is 86.4 mm.
+# Measured on the compiled model.
+_GRIPPER_GAP_OFFSET = 0.0036
+GRIPPER_MAX_WIDTH = 2 * 0.05 - _GRIPPER_GAP_OFFSET
+
+# solve_kinematic_ik's own default (400) is under-converged: at the edge of the
+# workspace it reports ~110 mm of residual where 1200 iterations reach ~15 mm.
+# The default is left alone so existing scenario trajectories stay bit-identical;
+# new callers pass max_iters=DEFAULT_IK_ITERS explicitly.
+DEFAULT_IK_ITERS = 1200
+
 # ---------- model index helpers ----------
 
 @dataclass
@@ -179,10 +193,51 @@ def set_arm_ctrl(data: mujoco.MjData, arm: ArmHandles, target_qpos_all: np.ndarr
         data.ctrl[aid] = target_qpos_all[arm.qidx[i]]
 
 
-def set_gripper(data: mujoco.MjData, arm: ArmHandles, action: str) -> None:
-    """action ∈ {'open', 'close'} -> set gripper ctrl."""
+def gripper_ctrl_for_fraction(fraction: float) -> float:
+    """0.0 = fully closed, 1.0 = GRIPPER_OPEN. Values are clamped."""
+    return float(np.clip(fraction, 0.0, 1.0)) * GRIPPER_OPEN
+
+
+def gripper_ctrl_for_width(width_m: float) -> float:
+    """Gripper ctrl that leaves `width_m` of clear gap between the pads.
+
+    Inverts gap(q) = 2*|q| - 0.0036. Clamped to the joint limit, so the widest
+    achievable gap is GRIPPER_MAX_WIDTH (96.4 mm); GRIPPER_OPEN corresponds to
+    86.4 mm.
+    """
+    q = (float(width_m) + _GRIPPER_GAP_OFFSET) / 2.0
+    return -float(np.clip(q, 0.0, 0.05))
+
+
+def gripper_width_from_qpos(qpos: float) -> float:
+    """Current clear pad gap, in metres, from the actuated finger joint value."""
+    return max(0.0, 2.0 * abs(float(qpos)) - _GRIPPER_GAP_OFFSET)
+
+
+def set_gripper(data: mujoco.MjData, arm: ArmHandles, action) -> None:
+    """Command the gripper.
+
+    `action` accepts:
+      'open'  / 'close' / 'hold'   - the original three-way interface
+      a float in [0, 1]            - fraction of the open stroke
+      a string like '0.4'          - same, so CLI values pass straight through
+
+    'hold' (and any unrecognised string) leaves ctrl untouched.
+    """
+    if isinstance(action, (int, float)):
+        data.ctrl[arm.gripper_aid] = gripper_ctrl_for_fraction(float(action))
+        return
     if action == "open":
         data.ctrl[arm.gripper_aid] = GRIPPER_OPEN
     elif action == "close":
         data.ctrl[arm.gripper_aid] = GRIPPER_CLOSED
-    # "hold" -> leave whatever ctrl was last set
+    elif action != "hold":
+        try:
+            data.ctrl[arm.gripper_aid] = gripper_ctrl_for_fraction(float(action))
+        except (TypeError, ValueError):
+            pass  # unknown label -> hold
+
+
+def set_gripper_width(data: mujoco.MjData, arm: ArmHandles, width_m: float) -> None:
+    """Open the gripper to a specific clear pad gap in metres."""
+    data.ctrl[arm.gripper_aid] = gripper_ctrl_for_width(width_m)
