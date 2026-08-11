@@ -313,3 +313,219 @@ def check_success(model, data, block_name, container_pos):
 - 시나리오 2: 왼팔 pick → **오른팔 handoff** → 오른팔 place  
 - 시나리오 3: 오른팔 pick → **왼팔 handoff** → 왼팔 place  
 - handoff은 두 EE를 같은 위치 + 반대 방향으로 맞추는 duo-frame IK 국면 + gripper 인수인계 타이밍 조율이 핵심.
+
+---
+
+# 모바일 양팔 운반 (crate transport) 시나리오
+
+> 변경 내역 전체 정리는 [`docs/TRANSPORT_SCENARIO_KO.md`](../../docs/TRANSPORT_SCENARIO_KO.md)를 보세요.
+
+기존 블록 pick-and-place 위에 **모바일 매니퓰레이션 VLA 시나리오**를 추가한 것입니다.
+기존 파이프라인은 한 줄도 바꾸지 않았습니다: `model.xml`, `scenario1/2/3`,
+`collect_dataset.py`, `preview_block_grid.py`는 그대로이고, 새 씬은 별도 root
+`model_transport.xml`에서 동작합니다.
+
+## 시나리오
+
+| 스크립트 | 내용 |
+|---|---|
+| `scenario_transport_crate.py` | 양팔로 크레이트 파지 → 리프트 → 베이스 주행 → 선반 배치 |
+| `scenario_transport_load_and_carry.py` | 한 손으로 과일 4종 중 하나를 파지 → 크레이트에 담기 → 위 시나리오 수행 |
+
+```bash
+python scenario_transport_crate.py --headless
+python scenario_transport_load_and_carry.py --headless --object apple
+python scenario_transport_load_and_carry.py --headless --object banana
+python scenario_transport_load_and_carry.py --headless --object orange
+python scenario_transport_load_and_carry.py --headless --object pear
+python scenario_transport_crate.py --headless --random --seed 3      # 도메인 랜덤화
+python scenario_transport_crate.py --headless --log-dataset /path/ds  # 17-D LeRobot 기록
+```
+
+## 새 파일
+
+```
+rby1_description/models/rby1a/mujoco/
+├── defaults_common.xml          # 공용 <default> (기존 model.xml에서 추출) + prop_visual/prop_collision
+├── actuators_arm.xml            # 기존 26개 액추에이터 (ctrl 0~25, 순서가 인터페이스)
+├── actuators_base.xml           # base_x/y/yaw position 액추에이터 (ctrl 26~28)
+├── scenes/scene_transport.xml   # 사무실 공간 + 테이블 + 크레이트 + 과일 4종 + 3단 선반
+├── scenes/office_assets.xml     # 사무실 바닥/벽 재질
+├── model_transport.xml          # 새 root (기본)
+└── model_transport_wheels.xml   # 실험용 차동구동 variant
+
+rby1_manipulation/
+├── transport_layout.json        # 크레이트/물체/선반/도킹 포즈 설정
+├── transport_scene.py           # config·리셋·랜덤화·17-D state/action, --self-check / --reach-report
+├── transport_plan.py            # 두 시나리오가 공유하는 웨이포인트 빌더
+├── bimanual_ik.py               # 양팔 IK 래퍼 + BiWaypoint 실행기
+├── motion_utils.py              # 램프/홀드/adaptive close (양팔·베이스)
+├── success_checks.py            # check_grasp / object_in_crate / crate_on_shelf / StopCheck
+├── episode_recording.py         # mp4 + LeRobot 프레임 캡처
+├── preview_transport_layout.py  # 레이아웃 뷰어/튜너
+└── wheel_drive.py               # 실험용 차동구동 컨트롤러
+```
+
+## 인터페이스
+
+- **카메라·관측**: `zed_left`/`wrist_cam_l`/`wrist_cam_r` → `cam_high`/`cam_left_wrist`/`cam_right_wrist`,
+  224×224 그대로. **변경 없음.**
+- **state/action**: 17-D `[L arm 0..5, L grip, R arm 0..5, R grip, base_x, base_y, base_yaw]`.
+  앞 14차원은 기존과 완전히 동일(그리퍼 정규화 `abs(qpos)/0.045` 포함)합니다.
+  `episode_logger.LeRobotWriter(..., schema="rby1_17_mobile")`로 opt-in하며,
+  기본값 `rby1_14`는 불변이라 기존 수집 스크립트는 그대로 동작합니다.
+- **추론**: `pi05_ex_infer.py --model rby1_mobile` (obs/action format `rby1_mobile`).
+  `ARM_DIMS`는 그대로 두어 BJ/IJ/CD 지표를 기존 실험과 비교할 수 있고,
+  베이스는 `BASE_DIMS = [14,15,16]`로 따로 봅니다.
+
+## 검증 — 실험별 명령어
+
+모두 `src/rby1_manipulation/`에서 실행하고, `python`은 `/home/mk/venv/pi0_TO_env/bin/python`
+(mink가 설치된 유일한 env)입니다.
+
+### A. 씬이 제대로 보이는지 (눈으로 확인)
+
+| 실험 | 명령어 | 합격 기준 |
+|---|---|---|
+| 씬 뷰어 | `python preview_transport_layout.py` | 사무실 방 안에 크레이트·손잡이·사과·바나나·오렌지·배·3단 선반이 모두 보임. 최상단(목표) 판은 청록색 |
+| 좌표 리포트 | `python preview_transport_layout.py --report-only` | 크레이트 정착 z=0.880, 손잡이 z=0.965, 베이스-선반 여유 0.120 m |
+
+> 뷰어에서 group 3(충돌 지오메트리)을 보려면 키보드 `3`을 누르세요. 기본은 숨김이며,
+> 씬의 모든 물체는 group 2 시각 geom을 따로 갖고 있습니다.
+>
+> 3인칭 카메라는 **방 안에** 두어야 합니다. 실내가 x ∈ [-2.9, 3.5], y ∈ [-3.7, 3.1]이므로
+> 거리 5 m를 넘기면 벽 바깥으로 나가 벽면만 찍힙니다
+> (`episode_recording.RECORD_DISTANCE = 3.0`).
+
+### B. 모델 정합성 (빠름, 각 10초~2분)
+
+| 실험 | 명령어 | 합격 기준 |
+|---|---|---|
+| 모델 불변식 | `python transport_scene.py --self-check` | `SELF-CHECK PASSED` |
+| IK 도달성 | `python transport_scene.py --reach-report` | `worst residual 2.0 mm` / `PASSED` |
+
+### C. 시나리오 동작 (각 2~4분)
+
+| 실험 | 명령어 | 합격 기준 |
+|---|---|---|
+| 시나리오 1 | `python scenario_transport_crate.py --headless` | `SUCCESS = True`, `xy_err` ≤ 0.01, `tilt=0.0deg` |
+| 시나리오 2 (사과) | `python scenario_transport_load_and_carry.py --headless --object apple` | 위 + `apple still in crate = True` |
+| 시나리오 2 (바나나) | `python scenario_transport_load_and_carry.py --headless --object banana` | 위 + `banana still in crate = True` |
+| 시나리오 2 (오렌지) | `python scenario_transport_load_and_carry.py --headless --object orange` | 위 + `orange still in crate = True` |
+| 시나리오 2 (배) | `python scenario_transport_load_and_carry.py --headless --object pear` | 위 + `pear still in crate = True` |
+| 영상으로 확인 | `python scenario_transport_crate.py --headless --record /tmp/crate.mp4` | mp4 생성 |
+
+### D. 데이터셋 (17-D 신규 / 14-D 불변)
+
+| 실험 | 명령어 | 합격 기준 |
+|---|---|---|
+| 17-D 수집 | `python scenario_transport_crate.py --headless --log-dataset /tmp/ds17` | `episode 0 (...) -> /tmp/ds17` |
+| 스키마 확인 | `python ../../scripts/validate_dataset.py --dataset /tmp/ds17` | `state shape=(N, 17)`, `done.` |
+| 14-D 회귀 | `python scenario1_single_arm.py --headless --block red --log-dataset /tmp/ds14` | parquet이 `[14]`, `robot_type="rby1"` |
+
+### E. 기존 파이프라인 회귀
+
+| 실험 | 명령어 | 합격 기준 |
+|---|---|---|
+| 블록 시나리오 | `python scenario1_single_arm.py --headless --block red` | `SUCCESS = True` |
+| model.xml no-op | 아래 스니펫 | `identical: True` |
+
+```bash
+cd ../  # src/
+git show HEAD:rby1_description/models/rby1a/mujoco/model.xml \
+  > rby1_description/models/rby1a/mujoco/_orig.xml
+python -c "
+import mujoco
+D='rby1_description/models/rby1a/mujoco/'
+f=lambda p:(lambda m:(m.nq,m.nv,m.nu,m.actuator_gainprm.round(9).tolist(),
+  m.actuator_biasprm.round(9).tolist(),m.body_mass.round(9).tolist(),
+  m.key_qpos.round(9).tolist()))(mujoco.MjModel.from_xml_path(D+p))
+print('identical:', f('_orig.xml')==f('model.xml'))"
+rm rby1_description/models/rby1a/mujoco/_orig.xml
+```
+
+### F. 랜덤화 견고성 (시드당 2~4분)
+
+아래 사과/바나나 성공률은 과일 mesh 및 4종 확장 전의 과거 측정값입니다. 현재 4종 배치기는
+100개 seed에서 최소 중심 간격 0.080 m를 통과했으며, 전체 task 성공률 sweep은 다시 측정해야 합니다.
+
+| 실험 | 명령어 | 현재 결과 |
+|---|---|---|
+| 시나리오 1 | `for s in $(seq 0 19); do python scenario_transport_crate.py --headless --random --seed $s \| grep -q "SUCCESS = True" && echo "$s PASS" \|\| echo "$s FAIL"; done` | **19/20** |
+| 시나리오 2 (바나나) | 위에서 스크립트만 `scenario_transport_load_and_carry.py --object banana`로 교체 | 8/10 |
+| 시나리오 2 (사과) | 위에서 `--object apple` | **3/10 — 미해결** |
+| 시나리오 2 (오렌지/배) | 각각 `--object orange`, `--object pear` | random pose 전체 sweep 미측정 |
+
+### G. wheel 모드 (실험용, 성공 기대 안 함)
+
+```bash
+python scenario_transport_crate.py --headless --base-mode wheel
+```
+배너 출력 + NaN 없이 완주하면 통과입니다. `SUCCESS = False`가 정상입니다.
+
+## 이 씬에서 반드시 알아야 할 것들 (실측)
+
+1. **베이스는 바닥에 박혀 있다.** `base`에 z DoF가 없고 충돌 메쉬 하단이 z=-0.003이라
+   바닥을 2.6 mm 관통 → 정상상태 수직항력 **248,943 N**. `model_transport.xml`의
+   `<contact><exclude>`(world↔base/wheel_r/wheel_l)가 없으면 어떤 gain으로도 움직이지 않습니다.
+2. **`impratio="10"`이 양팔 파지를 가능하게 한다.** 기본값 1에서는 모든 접촉이 마찰 원뿔
+   안쪽인데도 크레이트가 초당 5 mm씩 미끄러져 4초 만에 떨어집니다. 10에서는 10초간 3.8 mm.
+3. **`class="collision"`을 씬 물체에 쓰면 안 된다.** `conaffinity=0`이라 로봇 손가락과
+   접촉 자체가 계산되지 않습니다. `prop_collision`(contype=1 conaffinity=1)을 쓰세요.
+4. **`GRASP_PAD_OFFSET = 0.003`** — 패드 중심은 EE 사이트와 거의 일치합니다.
+   0.0244로 잡으면 봉이 패드 아래 가장자리에 걸려 1초 만에 빠집니다.
+5. **리프트는 `carry.clear_z` 기준 절대 높이 + 폐루프 트림.** 팔이 하중으로 ~70 mm 처지므로
+   개루프 리프트로는 크레이트가 선반 상단 판보다 낮아져 주행 중 들이받습니다.
+6. **손잡이 위를 지나는 경로.** 손가락이 패드 중심보다 ~40 mm 아래로 뻗으므로,
+   소형 물체 접근·운반 경로는 손잡이 상단 + 0.14 m로 넘어가야 합니다.
+7. **소형 물체는 |y| ≥ 0.29에 스폰.** 손잡이 자체는 |y|=0.21까지지만 팔뚝이 훨씬 넓어
+   |y| ≤ 0.28에서는 하강 시 손잡이에 걸려 50~80 mm 오차가 납니다.
+8. **바나나는 시각=캡슐, 충돌=박스.** 수평 원기둥은 평면 패드 사이에서 튕겨 나갑니다.
+9. **선반 목표는 최상단(위가 열린 단)만 가능.** 그리퍼+손목이 크레이트 위로 ~0.25 m
+   튀어나와, 위에 판이 있는 단에는 넣을 수 없습니다. 하단 판은 distractor입니다.
+10. **모델은 절대경로로 로드.** 상대경로면 `rby1.xml`의 WHEEL geoms 중복 include에서
+    XML 오류가 납니다(mujoco 3.10.0 기준).
+
+## 그리퍼 개도 제어
+
+그리퍼는 열림/닫힘 두 값이 아니라 **원하는 만큼** 열 수 있습니다.
+
+```python
+from ik_utils import set_gripper, set_gripper_width, gripper_width_from_qpos
+
+set_gripper(data, arm, "open")        # 기존 인터페이스 그대로 (= 86.4 mm)
+set_gripper(data, arm, "close")
+set_gripper(data, arm, 0.6)           # 전체 스트로크의 60 %
+set_gripper_width(data, arm, 0.030)   # 패드 간격 30 mm 지정
+gripper_width_from_qpos(data.qpos[arm.gripper_qidx])   # 현재 간격 읽기
+```
+
+- 변환식은 실측입니다: `gap(q) = 2|q| - 0.0036`. 조인트 한계에서 최대 **96.4 mm**,
+  `GRIPPER_OPEN`(-0.045)이 86.4 mm입니다. 명령한 폭과 실측 폭이 0.0 mm 오차로 일치합니다.
+- `BiWaypoint.gripper`도 `"open"/"close"/"hold"` 외에 **float**를 받습니다.
+- 시나리오 CLI: `--grip-open 0.6` (접근·릴리스 시 개도). 기본 1.0.
+- `set_gripper`의 기존 3-way 호출은 그대로 동작하므로 기존 코드 영향 없음.
+
+## wheel 모드
+
+`--base-mode wheel`은 `model_transport_wheels.xml` + `actuators_arm_wheeldrive.xml`을
+로드해 두 바퀴로 베이스를 구동합니다.
+
+**직진은 정상 동작합니다** — 바퀴 -1.90 rad/s에 베이스 +0.201 m/s로 유효 구름 반경
+0.1004 m, 미끄러짐 0의 완전한 no-slip 구름입니다.
+
+이렇게 되기까지 고친 것:
+- 바퀴 액추에이터의 `ctrlrange`가 `[-3.14, 3.14]`였습니다. 조인트는 `limited="false"`인데
+  `inheritrange="1"`이 기본 클래스의 range를 가져간 탓으로, **바퀴가 반 바퀴 이상 돌 수
+  없어 최대 ±0.31 m만 이동 가능**했습니다. → 전용 velocity 액추에이터로 분리.
+- `WHEEL_RADIUS`가 0.0602로 40 % 낮게 잘못 잡혀 있었습니다 → 실측 **0.1004**.
+- 부호 규약 실측 확정: 전진 = **음의** 바퀴 속도, `L+ / R-` = +yaw.
+
+**제자리 회전은 아직 안 됩니다.** 명령 0.758 rad/s 대비 실제 0.13 rad/s이고, 원인은
+바퀴 스톨입니다(yaw는 실제 바퀴 속도의 구름 예측과 정확히 일치 = 미끄러짐 0).
+근본 원인은 `base`에 z 자유도가 없어 접촉 수직력이 바퀴당 **28 kN**(실제 무게의 50배)이
+되는 것으로, 접촉 강성·armature·damping을 낮추는 시도는 모두 발산(NaN)했습니다.
+제대로 고치려면 `rby1.xml`의 `base`에 수직 자유도가 필요한데, 이 파일은 블록 파이프라인과
+공유되며 `nq`가 바뀌어 기존 keyframe·데이터셋 인덱싱이 깨집니다.
+
+**데이터 수집에는 kinematic 모드(기본)를 사용하세요** — 베이스 포즈가 정확히 재현됩니다.
