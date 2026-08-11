@@ -23,7 +23,7 @@ import mink
 import mujoco
 import numpy as np
 
-from ik_utils import (
+from rby1_manipulation.control.ik import (
     ArmHandles,
     DEFAULT_IK_ITERS,
     se3_at,

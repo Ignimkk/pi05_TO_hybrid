@@ -9,9 +9,9 @@ Mirrors scenario1_single_arm.py's structure (argparse -> reset -> phases ->
 success print -> optional dataset logging) so the two are easy to read side by
 side, but runs on model_transport.xml and the 17-D state/action layout.
 
-    python scenario_transport_crate.py --headless
-    python scenario_transport_crate.py --headless --record /tmp/crate.mp4
-    python scenario_transport_crate.py --headless --random --seed 3
+    python -m rby1_manipulation.tasks.transport_crate --headless
+    python -m rby1_manipulation.tasks.transport_crate --headless --record /tmp/crate.mp4
+    python -m rby1_manipulation.tasks.transport_crate --headless --random --seed 3
 """
 from __future__ import annotations
 
@@ -24,25 +24,23 @@ from typing import Optional
 import mujoco
 import numpy as np
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-
-from bimanual_ik import execute_bimanual_waypoints
-from ik_utils import (
+from rby1_manipulation.control.bimanual import execute_bimanual_waypoints
+from rby1_manipulation.control.ik import (
     LEFT_ARM_JOINTS,
     RIGHT_ARM_JOINTS,
     build_dof_mask,
     left_arm_handles,
     right_arm_handles,
 )
-from motion_utils import (
+from rby1_manipulation.control.motion import (
     CRATE_SQUEEZE,
     adaptive_close,
     hold_ctrl_for_secs,
     open_grippers,
     ramp_base,
 )
-from success_checks import check_grasp, crate_on_shelf
-from transport_plan import (
+from rby1_manipulation.evaluation.transport import check_grasp, crate_on_shelf
+from rby1_manipulation.planning.transport import (
     capture_grasp_frames,
     crate_approach_waypoints,
     crate_lift_waypoints,
@@ -50,7 +48,7 @@ from transport_plan import (
     crate_retract_waypoints,
     drive_waypoints,
 )
-from transport_scene import (
+from rby1_manipulation.simulation.transport_scene import (
     CRATE_BODY,
     MODEL_XML,
     MODEL_XML_WHEELS,
@@ -131,7 +129,7 @@ def drive_to_shelf(model, data, config, base, wheel_mode, *,
             model, data, right_arm=right, left_arm=left,
             right_mask=rmask, left_mask=lmask, waypoints=waypoints, base=base, **kw)
         return
-    from wheel_drive import drive_base_with_wheels
+    from rby1_manipulation.control.mobile_base import drive_base_with_wheels
     for wp in waypoints:
         err = drive_base_with_wheels(model, data, base, wp.base, wp.duration, **kw)
         print(f"  wp {wp.label:14s} [wheel] pose error "
@@ -143,7 +141,7 @@ def main() -> int:
 
     wheel_mode = args.base_mode == "wheel"
     if wheel_mode:
-        from wheel_drive import drive_base_with_wheels, wheel_mode_banner
+        from rby1_manipulation.control.mobile_base import wheel_mode_banner
         wheel_mode_banner()
 
     config = load_layout_config(args.config) if args.config else load_layout_config()
@@ -171,7 +169,7 @@ def main() -> int:
     recorder = None
     logger = None
     if args.record or args.log_dataset:
-        from episode_recording import EpisodeRecorder
+        from rby1_manipulation.data.recording import EpisodeRecorder
         recorder = EpisodeRecorder(
             model, data, record_path=args.record,
             dataset_root=args.log_dataset, fps=args.log_fps,

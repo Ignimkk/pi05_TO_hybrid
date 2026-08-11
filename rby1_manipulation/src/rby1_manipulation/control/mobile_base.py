@@ -15,7 +15,7 @@ from typing import Callable, Dict, Optional
 import mujoco
 import numpy as np
 
-from motion_utils import WHEEL_HALF_TRACK, WHEEL_RADIUS
+from rby1_manipulation.control.motion import WHEEL_HALF_TRACK, WHEEL_RADIUS
 
 BANNER = """
   ----------------------------------------------------------------------------
@@ -24,6 +24,11 @@ BANNER = """
   kinematic mode for dataset collection.
   ----------------------------------------------------------------------------
 """
+
+
+def wheel_mode_banner() -> None:
+    """Print the experimental wheel-mode warning."""
+    print(BANNER)
 
 
 def wheel_actuator_ids(model: mujoco.MjModel) -> Dict[str, int]:

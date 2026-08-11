@@ -13,7 +13,7 @@ from typing import Callable, Dict, Optional, Sequence
 import mujoco
 import numpy as np
 
-from ik_utils import ArmHandles, set_gripper, set_gripper_width
+from rby1_manipulation.control.ik import ArmHandles, set_gripper, set_gripper_width
 
 # Latched squeeze offsets: after the fingers stall on the object we set
 # ctrl = qpos + offset, so the holding force settles at kp * offset instead of

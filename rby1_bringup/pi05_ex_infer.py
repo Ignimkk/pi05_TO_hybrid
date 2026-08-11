@@ -2,7 +2,7 @@
 
 The production-style single-run entry point remains ``pi05_infer.py``.  This
 copy adds the deterministic grid loop and consumes coordinates saved by
-``rby1_manipulation/preview_block_grid.py``.
+``rby1_manipulation.tools.preview_block_grid``.
 """
 
 import argparse
@@ -28,12 +28,12 @@ MODEL_XML = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" /
 # shelf / small objects and position actuators on the base (ctrl 26/27/28).
 MODEL_XML_TRANSPORT = str(REPO_ROOT / "rby1_description" / "models" / "rby1a"
                           / "mujoco" / "model_transport.xml")
-MANIPULATION_DIR = REPO_ROOT / "rby1_manipulation"
-if str(MANIPULATION_DIR) not in sys.path:
-    sys.path.insert(0, str(MANIPULATION_DIR))
+MANIPULATION_SRC = REPO_ROOT / "rby1_manipulation" / "src"
+if str(MANIPULATION_SRC) not in sys.path:
+    sys.path.insert(0, str(MANIPULATION_SRC))
 
-from transport_scene import BASE_ACTS, BASE_JOINTS
-from preview_block_grid import (
+from rby1_manipulation.simulation.transport_scene import BASE_ACTS, BASE_JOINTS
+from rby1_manipulation.tools.preview_block_grid import (
     BLOCK_BODIES,
     COLORS as GRID_COLORS,
     DEFAULT_GRID_CONFIG,

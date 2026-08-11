@@ -2,17 +2,33 @@
 
 RBY1 sim에서 VLA(π0.5 등) 학습용 (obs, action) 시연 데이터를 자동으로 수집하기 위한 모션 컨트롤러. IK로 EE 궤적을 계획하고, 관절 공간에서 부드럽게 트래킹하며, LeRobot ALOHA 스키마로 저장합니다.
 
-디렉토리 구조:
+설치 및 실행:
+
+```bash
+python -m pip install -e src/rby1_manipulation
+python -m rby1_manipulation.tasks.block_pick --headless --block red
+python -m rby1_manipulation.tasks.transport_load_and_carry --headless --object apple
+```
+
+기능별 디렉토리 구조:
+
 ```
 src/rby1_manipulation/
-├── ik_utils.py                  # mink 어댑터 + 관절 인덱스 캐시
-├── scene_utils.py               # 블록 랜덤화 + 자동 팔 선택
-├── episode_logger.py            # LeRobot ALOHA 포맷 writer
-├── follow_mocap.py              # 뷰어에서 mocap을 드래그해 팔 원격조작 (IK 검증용)
-├── scenario1_single_arm.py      # 단팔 pick-place 1 에피소드
-├── collect_batch.py             # 여러 에피소드 배치 수집
-└── README.md                    # 본 문서
+├── pyproject.toml
+├── src/rby1_manipulation/
+│   ├── control/                 # IK, 단팔/양팔, 모션, 모바일 베이스
+│   ├── simulation/              # 블록/운반 MuJoCo 씬과 랜덤화
+│   ├── planning/                # 운반 태스크 웨이포인트 계획
+│   ├── evaluation/              # 성공·정지 조건
+│   ├── tasks/                   # 실행 가능한 시나리오
+│   ├── data/                    # 에피소드 기록과 배치 수집
+│   ├── tools/                   # preview와 mocap 도구
+│   └── config/                  # 패키지에 포함되는 JSON 기본값
+└── tests/
 ```
+
+상세한 모듈 책임, 의존 방향, 이전 파일명 매핑은
+[`docs/RBY1_MANIPULATION_PACKAGE_STRUCTURE_KO.md`](../../docs/RBY1_MANIPULATION_PACKAGE_STRUCTURE_KO.md)를 참고합니다.
 
 ---
 
@@ -77,7 +93,7 @@ config.integrate_inplace(vel, dt)
 
 ## 2. 유틸리티 함수
 
-### `ik_utils.py` — IK와 관절 인덱스 캐시
+### `control/ik.py` — IK와 관절 인덱스 캐시
 
 | 심볼 | 역할 |
 |---|---|
@@ -95,7 +111,7 @@ config.integrate_inplace(vel, dt)
 | **`set_arm_ctrl(data, arm, target_qpos_all)`** | 전체 qpos 벡터에서 arm 관절만 뽑아 액추에이터에 설정 |
 | **`set_gripper(data, arm, 'open'/'close')`** | 그리퍼 ctrl 세팅 |
 
-### `scene_utils.py` — 씬 랜덤화 + 팔 자동 라우팅
+### `simulation/common.py` — 씬 랜덤화 + 팔 자동 라우팅
 
 | 심볼 | 역할 |
 |---|---|
@@ -105,7 +121,7 @@ config.integrate_inplace(vel, dt)
 | **`pick_arm_for_block(block_pos)`** | `y < -0.05 → right`, `y > 0.05 → left`, 그 외 `default` |
 | **`randomize_blocks(model, data, rng)`** | 3 블록 모두 각자 팔 envelope 내로 재배치 후 forward |
 
-### `episode_logger.py` — LeRobot ALOHA 스키마 writer
+### `data/episode.py` — LeRobot ALOHA 스키마 writer
 
 | 심볼 | 역할 |
 |---|---|
@@ -172,8 +188,8 @@ config.integrate_inplace(vel, dt)
 ### 실행
 
 ```bash
-python src/rby1_manipulation/follow_mocap.py            # 오른팔만
-python src/rby1_manipulation/follow_mocap.py --dual     # 양팔
+python -m rby1_manipulation.tools.follow_mocap            # 오른팔만
+python -m rby1_manipulation.tools.follow_mocap --dual     # 양팔
 ```
 
 뷰어에서:
@@ -185,7 +201,7 @@ python src/rby1_manipulation/follow_mocap.py --dual     # 양팔
 
 ---
 
-## 4. Single-arm 시나리오 (`scenario1_single_arm.py`)
+## 4. Single-arm 시나리오 (`rby1_manipulation.tasks.block_pick`)
 
 ### 태스크 정의
 `R/G/B 블록 하나를 (자동으로 선택된) 팔로 pick → 갈색 컨테이너에 place`
@@ -267,7 +283,7 @@ else:                 # 중앙
 ### 배치 수집 (`collect_batch.py`)
 
 ```bash
-python src/rby1_manipulation/collect_batch.py \
+python -m rby1_manipulation.data.collect_batch \
     --root ~/dev_ws/vla/pi0_TO_ws/data/rby1_scenario1 \
     --colors red green blue \
     --n-per-color 20 \
@@ -333,13 +349,13 @@ def check_success(model, data, block_name, container_pos):
 | `scenario_transport_load_and_carry.py` | 한 손으로 과일 4종 중 하나를 파지 → 크레이트에 담기 → 위 시나리오 수행 |
 
 ```bash
-python scenario_transport_crate.py --headless
-python scenario_transport_load_and_carry.py --headless --object apple
-python scenario_transport_load_and_carry.py --headless --object banana
-python scenario_transport_load_and_carry.py --headless --object orange
-python scenario_transport_load_and_carry.py --headless --object pear
-python scenario_transport_crate.py --headless --random --seed 3      # 도메인 랜덤화
-python scenario_transport_crate.py --headless --log-dataset /path/ds  # 17-D LeRobot 기록
+python -m rby1_manipulation.tasks.transport_crate --headless
+python -m rby1_manipulation.tasks.transport_load_and_carry --headless --object apple
+python -m rby1_manipulation.tasks.transport_load_and_carry --headless --object banana
+python -m rby1_manipulation.tasks.transport_load_and_carry --headless --object orange
+python -m rby1_manipulation.tasks.transport_load_and_carry --headless --object pear
+python -m rby1_manipulation.tasks.transport_crate --headless --random --seed 3      # 도메인 랜덤화
+python -m rby1_manipulation.tasks.transport_crate --headless --log-dataset /path/ds  # 17-D LeRobot 기록
 ```
 
 ## 새 파일
@@ -408,26 +424,26 @@ rby1_manipulation/
 
 | 실험 | 명령어 | 합격 기준 |
 |---|---|---|
-| 시나리오 1 | `python scenario_transport_crate.py --headless` | `SUCCESS = True`, `xy_err` ≤ 0.01, `tilt=0.0deg` |
-| 시나리오 2 (사과) | `python scenario_transport_load_and_carry.py --headless --object apple` | 위 + `apple still in crate = True` |
-| 시나리오 2 (바나나) | `python scenario_transport_load_and_carry.py --headless --object banana` | 위 + `banana still in crate = True` |
-| 시나리오 2 (오렌지) | `python scenario_transport_load_and_carry.py --headless --object orange` | 위 + `orange still in crate = True` |
-| 시나리오 2 (배) | `python scenario_transport_load_and_carry.py --headless --object pear` | 위 + `pear still in crate = True` |
-| 영상으로 확인 | `python scenario_transport_crate.py --headless --record /tmp/crate.mp4` | mp4 생성 |
+| 시나리오 1 | `python -m rby1_manipulation.tasks.transport_crate --headless` | `SUCCESS = True`, `xy_err` ≤ 0.01, `tilt=0.0deg` |
+| 시나리오 2 (사과) | `python -m rby1_manipulation.tasks.transport_load_and_carry --headless --object apple` | 위 + `apple still in crate = True` |
+| 시나리오 2 (바나나) | `python -m rby1_manipulation.tasks.transport_load_and_carry --headless --object banana` | 위 + `banana still in crate = True` |
+| 시나리오 2 (오렌지) | `python -m rby1_manipulation.tasks.transport_load_and_carry --headless --object orange` | 위 + `orange still in crate = True` |
+| 시나리오 2 (배) | `python -m rby1_manipulation.tasks.transport_load_and_carry --headless --object pear` | 위 + `pear still in crate = True` |
+| 영상으로 확인 | `python -m rby1_manipulation.tasks.transport_crate --headless --record /tmp/crate.mp4` | mp4 생성 |
 
 ### D. 데이터셋 (17-D 신규 / 14-D 불변)
 
 | 실험 | 명령어 | 합격 기준 |
 |---|---|---|
-| 17-D 수집 | `python scenario_transport_crate.py --headless --log-dataset /tmp/ds17` | `episode 0 (...) -> /tmp/ds17` |
+| 17-D 수집 | `python -m rby1_manipulation.tasks.transport_crate --headless --log-dataset /tmp/ds17` | `episode 0 (...) -> /tmp/ds17` |
 | 스키마 확인 | `python ../../scripts/validate_dataset.py --dataset /tmp/ds17` | `state shape=(N, 17)`, `done.` |
-| 14-D 회귀 | `python scenario1_single_arm.py --headless --block red --log-dataset /tmp/ds14` | parquet이 `[14]`, `robot_type="rby1"` |
+| 14-D 회귀 | `python -m rby1_manipulation.tasks.block_pick --headless --block red --log-dataset /tmp/ds14` | parquet이 `[14]`, `robot_type="rby1"` |
 
 ### E. 기존 파이프라인 회귀
 
 | 실험 | 명령어 | 합격 기준 |
 |---|---|---|
-| 블록 시나리오 | `python scenario1_single_arm.py --headless --block red` | `SUCCESS = True` |
+| 블록 시나리오 | `python -m rby1_manipulation.tasks.block_pick --headless --block red` | `SUCCESS = True` |
 | model.xml no-op | 아래 스니펫 | `identical: True` |
 
 ```bash
@@ -451,7 +467,7 @@ rm rby1_description/models/rby1a/mujoco/_orig.xml
 
 | 실험 | 명령어 | 현재 결과 |
 |---|---|---|
-| 시나리오 1 | `for s in $(seq 0 19); do python scenario_transport_crate.py --headless --random --seed $s \| grep -q "SUCCESS = True" && echo "$s PASS" \|\| echo "$s FAIL"; done` | **19/20** |
+| 시나리오 1 | `for s in $(seq 0 19); do python -m rby1_manipulation.tasks.transport_crate --headless --random --seed $s \| grep -q "SUCCESS = True" && echo "$s PASS" \|\| echo "$s FAIL"; done` | **19/20** |
 | 시나리오 2 (바나나) | 위에서 스크립트만 `scenario_transport_load_and_carry.py --object banana`로 교체 | 8/10 |
 | 시나리오 2 (사과) | 위에서 `--object apple` | **3/10 — 미해결** |
 | 시나리오 2 (오렌지/배) | 각각 `--object orange`, `--object pear` | random pose 전체 sweep 미측정 |
@@ -459,7 +475,7 @@ rm rby1_description/models/rby1a/mujoco/_orig.xml
 ### G. wheel 모드 (실험용, 성공 기대 안 함)
 
 ```bash
-python scenario_transport_crate.py --headless --base-mode wheel
+python -m rby1_manipulation.tasks.transport_crate --headless --base-mode wheel
 ```
 배너 출력 + NaN 없이 완주하면 통과입니다. `SUCCESS = False`가 정상입니다.
 
@@ -491,7 +507,11 @@ python scenario_transport_crate.py --headless --base-mode wheel
 그리퍼는 열림/닫힘 두 값이 아니라 **원하는 만큼** 열 수 있습니다.
 
 ```python
-from ik_utils import set_gripper, set_gripper_width, gripper_width_from_qpos
+from rby1_manipulation.control.ik import (
+    gripper_width_from_qpos,
+    set_gripper,
+    set_gripper_width,
+)
 
 set_gripper(data, arm, "open")        # 기존 인터페이스 그대로 (= 86.4 mm)
 set_gripper(data, arm, "close")

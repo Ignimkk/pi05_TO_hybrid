@@ -33,9 +33,9 @@ Handoff sequence:
        while carrying, delivers to the container, releases.
 
 Usage:
-    python scenario2_left_to_right_handoff.py                   # viewer, red
-    python scenario2_left_to_right_handoff.py --block green --random --seed 3
-    python scenario2_left_to_right_handoff.py --headless \
+    python -m rby1_manipulation.tasks.handoff_left_to_right                   # viewer, red
+    python -m rby1_manipulation.tasks.handoff_left_to_right --block green --random --seed 3
+    python -m rby1_manipulation.tasks.handoff_left_to_right --headless \
         --log-dataset /tmp/rby1_scenario2
 
 NOTE: this design has not yet been tuned to 100% success. The 90 deg wrist
@@ -59,20 +59,24 @@ import mink
 if "--headless" in sys.argv and "MUJOCO_GL" not in os.environ:
     os.environ["MUJOCO_GL"] = "osmesa"
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from ik_utils import (
+from rby1_manipulation.control.ik import (
     right_arm_handles, left_arm_handles,
     RIGHT_ARM_JOINTS, LEFT_ARM_JOINTS,
     build_dof_mask,
     site_pose,
     GRIPPER_OPEN,
 )
-from scene_utils import set_block_pose
-from episode_logger import LeRobotWriter, Frame, CAMERAS as ALOHA_CAMERAS
-from scenario1_single_arm import (
-    MODEL_XML, BLOCK_BODIES, CONTAINER_BODY,
-    Waypoint, settle_scene, body_pos, execute_waypoints, check_success,
+from rby1_manipulation.control.motion import settle_scene
+from rby1_manipulation.control.single_arm import Waypoint, execute_waypoints
+from rby1_manipulation.evaluation.block import check_success
+from rby1_manipulation.simulation.block_scene import (
+    BLOCK_BODIES,
+    CONTAINER_BODY,
+    MODEL_XML,
+    body_pos,
 )
+from rby1_manipulation.simulation.common import set_block_pose
+from rby1_manipulation.data.episode import LeRobotWriter, Frame, CAMERAS as ALOHA_CAMERAS
 
 # --- Configuration ---
 LEFT_PICK_ENVELOPE = dict(x=(0.45, 0.55), y=(0.17, 0.22))

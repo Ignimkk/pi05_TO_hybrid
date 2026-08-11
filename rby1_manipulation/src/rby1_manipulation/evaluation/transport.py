@@ -24,8 +24,8 @@ from typing import Callable, Dict, Optional, Sequence, Tuple
 import mujoco
 import numpy as np
 
-from ik_utils import ArmHandles
-from transport_scene import (
+from rby1_manipulation.control.ik import ArmHandles
+from rby1_manipulation.simulation.transport_scene import (
     CRATE_BODY,
     CRATE_HALF,
     CRATE_INTERIOR_HALF,

@@ -26,9 +26,9 @@ import mink
 import mujoco
 import numpy as np
 
-from bimanual_ik import BiWaypoint, approach_target, grasp_site_target
-from ik_utils import site_pose
-from transport_scene import (
+from rby1_manipulation.control.bimanual import BiWaypoint, approach_target, grasp_site_target
+from rby1_manipulation.control.ik import site_pose
+from rby1_manipulation.simulation.transport_scene import (
     CRATE_BODY,
     CRATE_HALF,
     CRATE_HANDLE_LOCAL_Z,

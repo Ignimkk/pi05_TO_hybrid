@@ -23,9 +23,9 @@ design rationale. Only the arm roles are swapped:
       G ) LEFT returns to rest.
 
 Usage:
-    python scenario3_right_to_left_handoff.py                   # viewer, red
-    python scenario3_right_to_left_handoff.py --block green --random --seed 3
-    python scenario3_right_to_left_handoff.py --headless \
+    python -m rby1_manipulation.tasks.handoff_right_to_left                   # viewer, red
+    python -m rby1_manipulation.tasks.handoff_right_to_left --block green --random --seed 3
+    python -m rby1_manipulation.tasks.handoff_right_to_left --headless \
         --log-dataset /tmp/rby1_scenario3
 """
 from __future__ import annotations
@@ -43,20 +43,24 @@ import mink
 if "--headless" in sys.argv and "MUJOCO_GL" not in os.environ:
     os.environ["MUJOCO_GL"] = "osmesa"
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from ik_utils import (
+from rby1_manipulation.control.ik import (
     right_arm_handles, left_arm_handles,
     RIGHT_ARM_JOINTS, LEFT_ARM_JOINTS,
     build_dof_mask,
     site_pose,
     GRIPPER_OPEN,
 )
-from scene_utils import set_block_pose
-from episode_logger import LeRobotWriter, Frame, CAMERAS as ALOHA_CAMERAS
-from scenario1_single_arm import (
-    MODEL_XML, BLOCK_BODIES, CONTAINER_BODY,
-    Waypoint, settle_scene, body_pos, execute_waypoints, check_success,
+from rby1_manipulation.control.motion import settle_scene
+from rby1_manipulation.control.single_arm import Waypoint, execute_waypoints
+from rby1_manipulation.evaluation.block import check_success
+from rby1_manipulation.simulation.block_scene import (
+    BLOCK_BODIES,
+    CONTAINER_BODY,
+    MODEL_XML,
+    body_pos,
 )
+from rby1_manipulation.simulation.common import set_block_pose
+from rby1_manipulation.data.episode import LeRobotWriter, Frame, CAMERAS as ALOHA_CAMERAS
 
 # --- Configuration ---
 # Mirror of scenario 2's LEFT_PICK_ENVELOPE: RIGHT arm picks from the

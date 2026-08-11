@@ -25,19 +25,27 @@ import mujoco
 # Force offscreen GL for batch runs.
 os.environ.setdefault("MUJOCO_GL", "osmesa")
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-
-from ik_utils import (
+from rby1_manipulation.control.ik import (
     right_arm_handles, left_arm_handles,
     RIGHT_ARM_JOINTS, LEFT_ARM_JOINTS,
     build_dof_mask, site_pose,
     GRIPPER_OPEN,
 )
-from scene_utils import pick_arm_for_block, randomize_blocks
-from episode_logger import LeRobotWriter, Frame, CAMERAS as ALOHA_CAMERAS
-from scenario1_single_arm import (
-    MODEL_XML, BLOCK_BODIES, CONTAINER_BODY,
-    make_waypoints, settle_scene, body_pos, execute_waypoints, check_success,
+from rby1_manipulation.control.motion import settle_scene
+from rby1_manipulation.control.single_arm import execute_waypoints
+from rby1_manipulation.evaluation.block import check_success
+from rby1_manipulation.simulation.block_scene import (
+    BLOCK_BODIES,
+    CONTAINER_BODY,
+    MODEL_XML,
+    body_pos,
+)
+from rby1_manipulation.simulation.common import pick_arm_for_block, randomize_blocks
+from rby1_manipulation.data.episode import LeRobotWriter, Frame, CAMERAS as ALOHA_CAMERAS
+from rby1_manipulation.tasks.block_pick import (
+    adaptive_close_gripper,
+    make_waypoints_post_grasp,
+    make_waypoints_pre_grasp,
 )
 
 
@@ -77,7 +85,8 @@ def run_one_episode(model, data, writer, *, block_color: str, seed: int, log_fps
     ee_down = site_pose(data, model, arm.ee_site).rotation()
     block_pos_now = body_pos(model, data, block_name)
     container_pos_now = body_pos(model, data, CONTAINER_BODY)
-    waypoints = make_waypoints(block_pos_now, container_pos_now, ee_down)
+    pre_grasp = make_waypoints_pre_grasp(block_pos_now, ee_down)
+    post_grasp = make_waypoints_post_grasp(block_pos_now, container_pos_now, ee_down)
 
     # Dataset logging.
     prompt = f"pick up the {block_color} block and put it in the brown box"
@@ -117,7 +126,9 @@ def run_one_episode(model, data, writer, *, block_color: str, seed: int, log_fps
     if verbose:
         print(f"[{block_color:5s} seed={seed:3d} arm={arm_side:5s}]  ", end="", flush=True)
 
-    execute_waypoints(model, data, arm, arm_mask, waypoints, on_step=on_step)
+    execute_waypoints(model, data, arm, arm_mask, pre_grasp, on_step=on_step)
+    adaptive_close_gripper(model, data, arm, on_step=on_step)
+    execute_waypoints(model, data, arm, arm_mask, post_grasp, on_step=on_step)
     success = check_success(model, data, block_name, container_pos_now)
 
     if success:

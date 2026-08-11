@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rby1-manipulation"
+version = "0.1.0"
+description = "MuJoCo manipulation scenarios, control, planning, and data tools for RBY1"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "imageio",
+  "mink",
+  "mujoco",
+  "numpy",
+  "opencv-python",
+  "pyarrow",
+]
+
+[project.scripts]
+rby1-block-pick = "rby1_manipulation.tasks.block_pick:main"
+rby1-handoff-left-to-right = "rby1_manipulation.tasks.handoff_left_to_right:main"
+rby1-handoff-right-to-left = "rby1_manipulation.tasks.handoff_right_to_left:main"
+rby1-transport-crate = "rby1_manipulation.tasks.transport_crate:main"
+rby1-transport-load-and-carry = "rby1_manipulation.tasks.transport_load_and_carry:main"
+rby1-collect-dataset = "rby1_manipulation.data.collect_dataset:main"
+rby1-collect-batch = "rby1_manipulation.data.collect_batch:main"
+rby1-follow-mocap = "rby1_manipulation.tools.follow_mocap:main"
+rby1-preview-block-grid = "rby1_manipulation.tools.preview_block_grid:main"
+rby1-preview-transport-layout = "rby1_manipulation.tools.preview_transport_layout:main"
+rby1-check-transport-scene = "rby1_manipulation.simulation.transport_scene:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+rby1_manipulation = ["config/*.json", "config/grids/*.json"]

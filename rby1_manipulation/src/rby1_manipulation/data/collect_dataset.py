@@ -32,15 +32,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT  = SCRIPT_DIR.parents[1]  # …/pi0_TO_ws
 COLORS = ["red", "green", "blue"]
 
 
 @dataclass
 class ConfigSpec:
     label: str                      # e.g. "left_single_red"
-    scenario_script: str            # filename inside SCRIPT_DIR
+    scenario_module: str            # importable module passed to ``python -m``
     extra_args: List[str]           # per-episode CLI args (excluding --seed, --headless, --log-*)
     task_prompt: str                # LeRobot task string (overrides scenario default)
 
@@ -52,7 +50,7 @@ def build_configs() -> List[ConfigSpec]:
         # A) LEFT single-arm  (block on LEFT side, LEFT places)
         configs.append(ConfigSpec(
             label=f"left_single_{color}",
-            scenario_script="scenario1_single_arm.py",
+            scenario_module="rby1_manipulation.tasks.block_pick",
             extra_args=["--arm", "left", "--block", color,
                         "--spawn-side", "left", "--random"],
             task_prompt=f"put the {color} block in the brown box with your left hand",
@@ -60,21 +58,21 @@ def build_configs() -> List[ConfigSpec]:
         # B) LEFT -> RIGHT handoff  (block on LEFT side, RIGHT places)
         configs.append(ConfigSpec(
             label=f"left_handoff_{color}",
-            scenario_script="scenario2_left_to_right_handoff.py",
+            scenario_module="rby1_manipulation.tasks.handoff_left_to_right",
             extra_args=["--block", color, "--random"],
             task_prompt=f"put the {color} block in the brown box with your right hand",
         ))
         # C) RIGHT -> LEFT handoff  (block on RIGHT side, LEFT places)
         configs.append(ConfigSpec(
             label=f"right_handoff_{color}",
-            scenario_script="scenario3_right_to_left_handoff.py",
+            scenario_module="rby1_manipulation.tasks.handoff_right_to_left",
             extra_args=["--block", color, "--random"],
             task_prompt=f"put the {color} block in the brown box with your left hand",
         ))
         # D) RIGHT single-arm  (block on RIGHT side, RIGHT places)
         configs.append(ConfigSpec(
             label=f"right_single_{color}",
-            scenario_script="scenario1_single_arm.py",
+            scenario_module="rby1_manipulation.tasks.block_pick",
             extra_args=["--arm", "right", "--block", color,
                         "--spawn-side", "right", "--random"],
             task_prompt=f"put the {color} block in the brown box with your right hand",
@@ -88,7 +86,8 @@ def run_one_episode(cfg: ConfigSpec, seed: int, output_dir: Path,
     """Run one episode as a subprocess. Return (success, short_msg)."""
     cmd = [
         sys.executable,
-        str(SCRIPT_DIR / cfg.scenario_script),
+        "-m",
+        cfg.scenario_module,
         *cfg.extra_args,
         "--seed", str(seed),
         "--headless",

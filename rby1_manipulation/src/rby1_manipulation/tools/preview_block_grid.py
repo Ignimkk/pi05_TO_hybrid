@@ -22,12 +22,12 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-from scene_utils import set_block_pose
+from rby1_manipulation.simulation.common import set_block_pose
+from rby1_manipulation.paths import BLOCK_GRID_CONFIG, BLOCK_MODEL_XML
 
 
-SRC_ROOT = pathlib.Path(__file__).resolve().parents[1]
-MODEL_XML = SRC_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml"
-DEFAULT_GRID_CONFIG = pathlib.Path(__file__).with_name("block_grid.json")
+MODEL_XML = BLOCK_MODEL_XML
+DEFAULT_GRID_CONFIG = BLOCK_GRID_CONFIG
 
 COLORS = ("red", "green", "blue")
 SIDES = ("left", "right")

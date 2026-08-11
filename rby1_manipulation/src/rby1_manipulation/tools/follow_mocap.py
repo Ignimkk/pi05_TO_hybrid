@@ -36,8 +36,9 @@ import mujoco.viewer
 import mink
 import numpy as np
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-MODEL_XML = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml")
+from rby1_manipulation.paths import BLOCK_MODEL_XML
+
+MODEL_XML = str(BLOCK_MODEL_XML)
 
 RIGHT_EE_SITE = "right_ee"
 LEFT_EE_SITE  = "left_ee"

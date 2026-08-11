@@ -25,9 +25,7 @@ import sys
 import mujoco
 import numpy as np
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-
-from transport_scene import (
+from rby1_manipulation.simulation.transport_scene import (
     BASE_FRONT_OVERHANG,
     CRATE_BODY,
     CRATE_HALF,

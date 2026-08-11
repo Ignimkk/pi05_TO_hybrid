@@ -16,7 +16,7 @@ from typing import Callable, Dict, Optional
 import mujoco
 import numpy as np
 
-from episode_logger import EpisodeBuffer, Frame, LeRobotWriter
+from rby1_manipulation.data.episode import EpisodeBuffer, Frame, LeRobotWriter
 
 POLICY_IMAGE_SIZE = 224
 RECORD_SIZE = (640, 480)

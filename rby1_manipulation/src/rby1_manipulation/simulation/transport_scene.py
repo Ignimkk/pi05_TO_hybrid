@@ -29,25 +29,30 @@ from typing import Callable, Dict, Optional, Sequence, Tuple
 import mujoco
 import numpy as np
 
-from ik_utils import (
+from rby1_manipulation.control.ik import (
     ArmHandles,
     GRIPPER_OPEN,
     left_arm_handles,
     right_arm_handles,
 )
-from scene_utils import (
+from rby1_manipulation.paths import (
+    MUJOCO_MODEL_DIR,
+    TRANSPORT_LAYOUT_CONFIG,
+    TRANSPORT_MODEL_XML,
+    TRANSPORT_WHEEL_MODEL_XML,
+)
+from rby1_manipulation.simulation.common import (
     TRANSPORT_SMALL_OBJ_REACH,
     set_block_pose,
 )
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-_MUJOCO_DIR = REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco"
+_MUJOCO_DIR = MUJOCO_MODEL_DIR
 # Always absolute: loading these models through a relative path trips MuJoCo's
 # duplicate-include check on rby1.xml's twice-included WHEEL/geoms.xml.
-MODEL_XML = str(_MUJOCO_DIR / "model_transport.xml")
-MODEL_XML_WHEELS = str(_MUJOCO_DIR / "model_transport_wheels.xml")
+MODEL_XML = str(TRANSPORT_MODEL_XML)
+MODEL_XML_WHEELS = str(TRANSPORT_WHEEL_MODEL_XML)
 
-DEFAULT_LAYOUT_CONFIG = pathlib.Path(__file__).with_name("transport_layout.json")
+DEFAULT_LAYOUT_CONFIG = TRANSPORT_LAYOUT_CONFIG
 
 # ---------- scene naming (mirrors scenes/scene_transport.xml) ----------
 
@@ -603,16 +608,19 @@ def _reach_report(config_path: pathlib.Path, tol_mm: float = 10.0) -> int:
 
     Imported lazily so that --self-check does not need mink.
     """
-    from bimanual_ik import grasp_site_target, plan_error
-    from ik_utils import build_dof_mask
-    from transport_plan import (
+    from rby1_manipulation.control.bimanual import grasp_site_target, plan_error
+    from rby1_manipulation.control.ik import (
+        LEFT_ARM_JOINTS,
+        RIGHT_ARM_JOINTS,
+        build_dof_mask,
+    )
+    from rby1_manipulation.control.motion import ramp_base
+    from rby1_manipulation.planning.transport import (
         CRATE_APPROACH_STANDOFF,
         CRATE_LIFT_DZ,
         SHELF_APPROACH_DZ,
         capture_grasp_frames,
     )
-    from ik_utils import LEFT_ARM_JOINTS, RIGHT_ARM_JOINTS
-    from motion_utils import ramp_base
 
     config = load_layout_config(config_path)
     model = mujoco.MjModel.from_xml_path(MODEL_XML)

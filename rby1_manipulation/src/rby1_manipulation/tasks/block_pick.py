@@ -15,17 +15,14 @@ Approach:
 5. Success = block ends up inside the container xy-bounds and above its base.
 
 Usage:
-    python scenario1_single_arm.py                   # viewer on, right + red
-    python scenario1_single_arm.py --arm left --block green
-    python scenario1_single_arm.py --headless --record /tmp/scenario1.mp4
+    python -m rby1_manipulation.tasks.block_pick                   # viewer on, right + red
+    python -m rby1_manipulation.tasks.block_pick --arm left --block green
+    python -m rby1_manipulation.tasks.block_pick --headless --record /tmp/scenario1.mp4
 """
 from __future__ import annotations
 
 import argparse
-import pathlib
 import sys
-import time
-from dataclasses import dataclass
 from typing import List
 
 import numpy as np
@@ -38,17 +35,25 @@ if "--headless" in sys.argv and "MUJOCO_GL" not in __import__("os").environ:
     import os
     os.environ["MUJOCO_GL"] = "osmesa"
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from ik_utils import (
+from rby1_manipulation.control.ik import (
     ArmHandles,
     right_arm_handles, left_arm_handles,
     RIGHT_ARM_JOINTS, LEFT_ARM_JOINTS,
-    build_dof_mask, solve_kinematic_ik,
-    site_pose, se3_at,
-    set_arm_ctrl, set_gripper,
-    GRIPPER_OPEN, GRIPPER_CLOSED,
+    build_dof_mask,
+    site_pose,
+    GRIPPER_OPEN,
 )
-from scene_utils import (
+from rby1_manipulation.control.motion import settle_scene
+from rby1_manipulation.control.single_arm import Waypoint, execute_waypoints
+from rby1_manipulation.evaluation.block import check_success
+from rby1_manipulation.simulation.block_scene import (
+    BLOCK_BODIES,
+    BLOCK_HALF_SIZE,
+    CONTAINER_BODY,
+    MODEL_XML,
+    body_pos,
+)
+from rby1_manipulation.simulation.common import (
     pick_arm_for_block,
     randomize_blocks,
     sample_in_reach,
@@ -56,47 +61,18 @@ from scene_utils import (
     LEFT_ARM_REACH,
     RIGHT_ARM_REACH,
 )
-from episode_logger import (
+from rby1_manipulation.data.episode import (
     LeRobotWriter,
     EpisodeBuffer,
     Frame,
     CAMERAS as ALOHA_CAMERAS,
 )
-
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-MODEL_XML = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml")
-
-BLOCK_BODIES = {"red": "red_block", "green": "green_block", "blue": "blue_block"}
-CONTAINER_BODY = "container"
-BLOCK_HALF_SIZE = 0.025             # 5 cm cubes
-
 # Vertical offsets used by the waypoint plan.
 APPROACH_HEIGHT = 0.10               # hover above block on approach
 GRASP_HEIGHT_ABOVE_CENTER = 0.02     # descend to slightly above block center (~5 mm above top)
 LIFT_HEIGHT = 0.15                   # hover above table after grasp
 RELEASE_HEIGHT = 0.08                # release just above container top
 RETRACT_HEIGHT = 0.20
-
-
-@dataclass
-class Waypoint:
-    label: str
-    pos: np.ndarray          # target EE world position
-    quat: mink.SO3           # target EE orientation
-    gripper: str             # 'open' | 'close' | 'hold'
-    duration: float          # seconds to ramp from previous target
-    wait_after: float = 0.4  # seconds to hold after ramp
-
-
-def settle_scene(model, data, seconds: float = 1.5) -> None:
-    """Let blocks fall onto the table before we plan anything."""
-    steps = int(round(seconds / model.opt.timestep))
-    for _ in range(steps):
-        mujoco.mj_step(model, data)
-
-
-def body_pos(model, data, name: str) -> np.ndarray:
-    return data.xpos[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)].copy()
 
 
 # Adaptive gripper close constants (mirror of scenario 2/3 approach).
@@ -197,76 +173,6 @@ def adaptive_close_gripper(model: mujoco.MjModel, data: mujoco.MjData,
             on_step()
     print(f"    [GRIPPER] contact qpos={contact_qpos:+.4f}  "
           f"ctrl={data.ctrl[arm.gripper_aid]:+.4f}  (tiny squeeze)")
-
-
-def read_ctrl_snapshot(data: mujoco.MjData, arm: ArmHandles) -> np.ndarray:
-    return np.array([data.ctrl[a] for a in arm.aid])
-
-
-def execute_waypoints(
-    model: mujoco.MjModel,
-    data:  mujoco.MjData,
-    arm:   ArmHandles,
-    arm_mask: np.ndarray,
-    waypoints: List[Waypoint],
-    *,
-    viewer=None,
-    on_step=None,
-) -> None:
-    dt = model.opt.timestep
-    # Anchor for the ramp: the current arm ctrl values.
-    prev_target = read_ctrl_snapshot(data, arm)
-
-    for wp in waypoints:
-        # 1) Plan target arm joints for this waypoint via kinematic IK.
-        target_pose = se3_at(wp.pos, wp.quat)
-        q_target = solve_kinematic_ik(model, data.qpos, arm.ee_site, target_pose, arm_mask,
-                                      max_iters=300)
-        target_arm_ctrl = np.array([q_target[q] for q in arm.qidx])
-
-        # 2) Gripper command is applied at the start of the waypoint.
-        if wp.gripper != "hold":
-            set_gripper(data, arm, wp.gripper)
-
-        # 3) Linear joint-space ramp from prev_target to target_arm_ctrl.
-        ramp_steps = max(1, int(round(wp.duration / dt)))
-        for k in range(ramp_steps):
-            alpha = (k + 1) / ramp_steps
-            for i, aid in enumerate(arm.aid):
-                data.ctrl[aid] = (1 - alpha) * prev_target[i] + alpha * target_arm_ctrl[i]
-            mujoco.mj_step(model, data)
-            if viewer is not None:
-                viewer.sync()
-            if on_step is not None:
-                on_step()
-
-        # 4) Hold at target for wait_after seconds so actuators can settle.
-        hold_steps = max(0, int(round(wp.wait_after / dt)))
-        for i, aid in enumerate(arm.aid):
-            data.ctrl[aid] = target_arm_ctrl[i]
-        for _ in range(hold_steps):
-            mujoco.mj_step(model, data)
-            if viewer is not None:
-                viewer.sync()
-            if on_step is not None:
-                on_step()
-
-        prev_target = target_arm_ctrl
-
-        # Small status print.
-        ee_now = data.site_xpos[arm.ee_site_id]
-        err = np.linalg.norm(ee_now - wp.pos) * 1000
-        print(f"  wp {wp.label:9s} target={wp.pos.round(3).tolist()} "
-              f"EE={ee_now.round(3).tolist()} err={err:5.1f}mm gripper={wp.gripper}")
-
-
-def check_success(model, data, block_name: str, container_pos: np.ndarray,
-                  container_half_xy: float = 0.11, table_top_z: float = 0.82) -> bool:
-    p = body_pos(model, data, block_name)
-    inside_xy = (abs(p[0] - container_pos[0]) < container_half_xy and
-                 abs(p[1] - container_pos[1]) < container_half_xy)
-    above_table = p[2] > table_top_z - 0.01
-    return inside_xy and above_table
 
 
 def main():
