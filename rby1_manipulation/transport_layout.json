@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "crate": {
+    "xy": [0.52, 0.0],
+    "spawn_z": 0.88,
+    "handle_half_y": 0.2
+  },
+  "objects": {
+    "apple": {"xy": [0.46, -0.31], "spawn_z": 0.852},
+    "banana": {"xy": [0.46, 0.31], "spawn_z": 0.842},
+    "orange": {"xy": [0.55, -0.31], "spawn_z": 0.850},
+    "pear": {"xy": [0.55, 0.31], "spawn_z": 0.856}
+  },
+  "shelf": {
+    "xy": [0.0, -1.55],
+    "half_depth": 0.15,
+    "levels": [0.35, 0.7, 1.0],
+    "target_level": 2
+  },
+  "dock": {
+    "table": [0.0, 0.0, 0.0],
+    "shelf": [0.0, -0.95, -1.5707963]
+  },
+  "carry": {
+    "lift_z": 1.1,
+    "clear_z": 1.15
+  }
+}
