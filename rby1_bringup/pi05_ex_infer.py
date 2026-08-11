@@ -24,10 +24,15 @@ from PIL import Image
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODEL_XML = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml")
+# The mobile crate-transport scene. Same robot, same cameras, plus the crate /
+# shelf / small objects and position actuators on the base (ctrl 26/27/28).
+MODEL_XML_TRANSPORT = str(REPO_ROOT / "rby1_description" / "models" / "rby1a"
+                          / "mujoco" / "model_transport.xml")
 MANIPULATION_DIR = REPO_ROOT / "rby1_manipulation"
 if str(MANIPULATION_DIR) not in sys.path:
     sys.path.insert(0, str(MANIPULATION_DIR))
 
+from transport_scene import BASE_ACTS, BASE_JOINTS
 from preview_block_grid import (
     BLOCK_BODIES,
     COLORS as GRID_COLORS,
@@ -70,6 +75,17 @@ MODELS = {
         "checkpoint": "/mnt/dev/work/pi05_TO_hybrid/checkpoints/pi05_rby1_lora/full_run_30k/29999",
         "obs_format": "rby1",
         "action_format": "rby1",        # 14 = [L 6 abs joint, L grip, R 6 abs joint, R grip]
+        "model_xml": MODEL_XML,
+    },
+    "rby1_mobile": {
+        # Mobile crate transport. Loads model_transport.xml and predicts the
+        # 17-D layout (the rby1 14 plus the planar base pose). Point --checkpoint
+        # at a run trained on a 17-D dataset; the block checkpoint will not work.
+        "config": "pi05_rby1_mobile_lora",
+        "checkpoint": None,
+        "obs_format": "rby1_mobile",
+        "action_format": "rby1_mobile",  # 17 = rby1 14 + [base_x, base_y, base_yaw]
+        "model_xml": MODEL_XML_TRANSPORT,
     },
 }
 
@@ -96,6 +112,10 @@ POLICY_CAMERA_NAMES = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 # reported on the 12 arm joints only (grippers are near-binary and would dominate jerk).
 # Matches scripts/plot_rby1_jerk_comparison.py.
 ARM_DIMS = np.asarray([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12], dtype=np.int64)
+# The 17-D mobile layout appends the planar base pose. ARM_DIMS is deliberately
+# unchanged so BJ/IJ/CD stay comparable with the 14-D block runs; report base
+# motion separately rather than folding it into the arm metrics.
+BASE_DIMS = np.asarray([14, 15, 16], dtype=np.int64)
 
 
 def _json_float(value):
@@ -327,6 +347,15 @@ def build_obs(obs_format, m, d, renderer, idx, prompt):
             "prompt": prompt,
         }
 
+    if obs_format == "rby1_mobile":
+        # 17-D: the rby1 layout with the planar base pose appended. Cameras and
+        # the first 14 entries are identical, so the two share norm statistics
+        # for those dims.
+        base_obs = build_obs("rby1", m, d, renderer, idx, prompt)
+        base_pose = np.array([d.qpos[i] for i in idx["base_q"]], dtype=np.float64)
+        base_obs["state"] = np.concatenate([base_obs["state"], base_pose])
+        return base_obs
+
     raise ValueError(f"unknown obs_format: {obs_format}")
 
 
@@ -382,6 +411,15 @@ def apply_action(action_format, action, d, idx, act):
             d.ctrl[act["right_a"][i]] = right_targets[i]
         d.ctrl[act["left_grip_a"]]  = left_grip * RBY1_GRIPPER_OPEN
         d.ctrl[act["right_grip_a"]] = right_grip * RBY1_GRIPPER_OPEN
+        return
+
+    if action_format == "rby1_mobile":
+        # (17,) = rby1's 14 plus absolute base (x, y, yaw) in world coordinates.
+        # Applied straight to the base position actuators, matching how the arm
+        # targets are applied.
+        apply_action("rby1", action[:14], d, idx, act)
+        for i, aid in enumerate(act["base_a"]):
+            d.ctrl[aid] = float(action[14 + i])
         return
 
     raise ValueError(f"unknown action_format: {action_format}")
@@ -675,7 +713,9 @@ def main():
     capture_inputs = bool(args.record_inputs) or (args.grid_experiment and args.grid_record_inputs)
     collect_trajectory = bool(args.trajectory_out) or args.grid_experiment
 
-    m = mujoco.MjModel.from_xml_path(MODEL_XML)
+    # The scene follows the model: rby1_mobile needs the transport root, which
+    # also supplies the base actuators its action format writes to.
+    m = mujoco.MjModel.from_xml_path(mcfg.get("model_xml", MODEL_XML))
     d = mujoco.MjData(m)
     key = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "teleop")
     mujoco.mj_resetDataKeyframe(m, d, key)
@@ -695,12 +735,20 @@ def main():
                           for j in LEFT_ARM_JOINTS],
         "right_grip_q":  m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, GRIPPER_R_JOINT)],
         "left_grip_q":   m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, GRIPPER_L_JOINT)],
+        # Planar base DoFs. Present in every rby1a model; only the transport root
+        # actuates them.
+        "base_q":        [m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, j)]
+                          for j in BASE_JOINTS],
     }
     act = {
         "right_a":       [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, a) for a in RIGHT_ARM_ACTS],
         "left_a":        [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, a) for a in LEFT_ARM_ACTS],
         "right_grip_a":  mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, GRIPPER_R_ACT),
         "left_grip_a":   mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, GRIPPER_L_ACT),
+        # Empty on model.xml, which has no base actuators; only rby1_mobile uses it.
+        "base_a":        [a for a in
+                          (mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, n) for n in BASE_ACTS)
+                          if a >= 0],
     }
 
     # Policy-input renderer MUST match the training-data collection resolution exactly
