@@ -1,0 +1,77 @@
+<mujoco model="rby1_transport_wheels">
+  <!-- EXPERIMENTAL differential-drive variant of model_transport.xml.
+
+       Identical scene, identical arm actuators, but WITHOUT actuators_base.xml:
+       the base is meant to be driven by the two wheel servos instead of by
+       position servos on joint_x / joint_y / joint_th.
+
+       The wheels really do drive the robot here. Measured on this model: the
+       wheel/floor contact is condim=3 with mu=1.0, penetration is only
+       0.5-1.0 mm, and rotating the wheels moves the base with an implied rolling
+       radius of 0.1004 m against a true wheel radius of ~0.100 m, i.e. clean
+       no-slip rolling.
+
+       Two things had to be right for that:
+         * the wheels use VELOCITY actuators (actuators_arm_wheeldrive.xml). The
+           shared actuators_arm.xml drives them with position servos whose
+           inherited ctrlrange is [-3.14, 3.14] rad, capping travel at +-0.31 m;
+         * world<->base contact stays excluded. Body "base" has no z DoF and its
+           collision mesh bottoms out 2.6 mm below the floor plane, which produces
+           ~249 kN of normal force and locks the robot in place. The wheels are
+           NOT excluded - they are what the robot rides on.
+
+       The base still has no suspension travel (it is a planar x/y/yaw model), so
+       wheel normal force is set by penetration rather than by weight. Traction is
+       therefore effectively unlimited and the robot will not slip or tip.
+
+       model_transport.xml remains the choice for dataset collection: its base
+       position servos give an exactly repeatable pose, which a velocity-driven
+       base cannot. -->
+  <option timestep="0.002" solver="CG" iterations="30" tolerance="1e-6" impratio="10" />
+  <size nuserdata="144" />
+
+  <include file="./defaults_common.xml" />
+
+  <include file="./rby1.xml" />
+
+  <!-- Office room materials. Must sit in an <asset> block; MJCF merges multiple
+       <asset> sections, so this coexists with rby1.xml's own assets. -->
+  <asset>
+    <include file="scenes/office_assets.xml" />
+    <include file="scenes/transport_prop_assets.xml" />
+  </asset>
+
+  <worldbody>
+    <body name="left_ee_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2" group="3"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
+    </body>
+    <body name="right_ee_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0" rgba=".6 .3 .3 .2" group="3"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
+    </body>
+    <include file="scenes/scene_transport.xml"/>
+  </worldbody>
+
+  <contact>
+    <exclude body1="world" body2="base"/>
+  </contact>
+
+  <keyframe>
+    <!-- Same 66 values as model_transport.xml; see that file for the layout. -->
+    <key name='teleop' qpos='0 0 0 0 0
+                             0 0 0 0 0 0
+                             -0.3 -0.3 -0.0 -1.95 -0.3 1.5 -1.57 0 0
+                             -0.3 0.3 -0.0 -1.95 0.3 1.5 -1.57 0 0
+                             0 0.7
+                             0.52 0.0 0.880 1 0 0 0
+                             0.46 -0.31 0.852 1 0 0 0
+                             0.46 0.31 0.842 1 0 0 0
+                             0.55 -0.31 0.850 1 0 0 0
+                             0.55 0.31 0.856 1 0 0 0'/>
+  </keyframe>
+
+  <actuator>
+    <include file="./actuators_arm_wheeldrive.xml" />
+  </actuator>
+</mujoco>

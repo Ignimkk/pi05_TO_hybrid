@@ -1,0 +1,47 @@
+<mujocoinclude>
+  <!-- Same 26 actuators as actuators_arm.xml, in the same order, so ctrl indices
+       0..25 keep their meaning. ONLY the two wheel actuators differ.
+
+       Why they have to differ: actuators_arm.xml drives the wheels with
+       <position> servos that carry inheritrange="1". The wheel joints are
+       declared limited="false", but they still inherit range="-3.14 3.14" from
+       rby1.xml's default joint class, so inheritrange hands the actuator a
+       ctrlrange of [-3.14, 3.14]. A wheel that can never be commanded past half a
+       turn moves the robot at most +-0.31 m and then stops - which is exactly why
+       wheel-driven locomotion looked impossible before.
+
+       Velocity actuators are also the natural interface for a differential
+       drive: the controller thinks in wheel angular velocity, not angle.
+       ctrlrange +-20 rad/s is about +-2 m/s at the measured 0.1 m wheel radius. -->
+  <velocity name="left_wheel_act"  joint="left_wheel"  kv="400" ctrlrange="-20 20"/>
+  <velocity name="right_wheel_act" joint="right_wheel" kv="400" ctrlrange="-20 20"/>
+
+  <position class="med"   name="link1_act" joint="torso_0" />
+  <position class="stiff" name="link2_act" joint="torso_1" />
+  <position class="stiff" name="link3_act" joint="torso_2" />
+  <position class="stiff" name="link4_act" joint="torso_3" />
+  <position class="med"   name="link5_act" joint="torso_4" />
+  <position           name="link6_act" joint="torso_5" />
+
+  <position class="med" name="left_arm_1_act" joint="left_arm_0" />
+  <position class="med" name="left_arm_2_act" joint="left_arm_1" />
+  <position name="left_arm_3_act" joint="left_arm_2" />
+  <position class="med" name="left_arm_4_act" joint="left_arm_3" />
+  <position name="left_arm_5_act" joint="left_arm_4" />
+  <position name="left_arm_6_act" joint="left_arm_5" />
+  <position name="left_arm_7_act" joint="left_arm_6" />
+
+  <position class="med" name="right_arm_1_act" joint="right_arm_0" />
+  <position class="med" name="right_arm_2_act" joint="right_arm_1" />
+  <position name="right_arm_3_act" joint="right_arm_2" />
+  <position class="med" name="right_arm_4_act" joint="right_arm_3" />
+  <position name="right_arm_5_act" joint="right_arm_4" />
+  <position name="right_arm_6_act" joint="right_arm_5" />
+  <position name="right_arm_7_act" joint="right_arm_6" />
+
+  <position name="head_0_act" joint="head_0" />
+  <position name="head_1_act" joint="head_1" />
+
+  <position name="gripper_r_act" joint="gripper_finger_r1" kp="1500" dampratio="1" inheritrange="1"/>
+  <position name="gripper_l_act" joint="gripper_finger_l1" kp="1500" dampratio="1" inheritrange="1"/>
+</mujocoinclude>
