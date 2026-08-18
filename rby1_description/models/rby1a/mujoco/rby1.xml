@@ -8,14 +8,24 @@
 
   <visual>
       <map force="0.1" zfar="30"/>
-      <rgba haze="0.15 0.25 0.35 1"/>
+      <!-- ACHROMATIC: was "0.15 0.25 0.35 1" (blue, same hue family as the block).
+           0.236 grey carries the same Rec.709 luminance. Restore the original to revert. -->
+      <rgba haze="0.236 0.236 0.236 1"/>
       <quality shadowsize="4096"/>
       <global offwidth="800" offheight="800"/>
   </visual>
 
   <asset>
-    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="512" />
-    <texture name="plane" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512"
+    <!-- ACHROMATIC BACKGROUND (color-effect ablation, 2026-08-05).
+         Skybox and floor originally shared hue H=105 with the blue block, so 62% of every policy
+         input image fell inside the blue block's colour range. These greys carry the *same relative
+         luminance* as the originals (Rec.709 Y), so only chroma changes:
+             skybox rgb1  0.3 0.5 0.7   -> 0.472 grey   (Y = 0.4719)
+             floor  rgb1  .2 .3 .4      -> 0.286 grey   (Y = 0.2860)
+             floor  rgb2  .1 .15 .2     -> 0.143 grey   (Y = 0.1430)
+         To restore the original scene, put those three values back. -->
+    <texture type="skybox" builtin="gradient" rgb1="0.472 0.472 0.472" rgb2="0 0 0" width="512" height="512" />
+    <texture name="plane" type="2d" builtin="checker" rgb1=".286 .286 .286" rgb2=".143 .143 .143" width="512" height="512"
       mark="cross" markrgb=".8 .8 .8" />
     <material name="plane" reflectance="0.3" texture="plane" texrepeat="1 1" texuniform="true" />
 
