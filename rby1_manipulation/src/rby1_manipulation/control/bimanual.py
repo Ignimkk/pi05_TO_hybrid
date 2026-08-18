@@ -132,12 +132,23 @@ def execute_bimanual_waypoints(
     max_iters: int = DEFAULT_IK_ITERS,
     viewer=None,
     on_step: Optional[Callable[[], None]] = None,
+    stop_condition: Optional[Callable[[], bool]] = None,
     verbose: bool = True,
-) -> None:
+) -> bool:
     """Plan and run a waypoint list, ramping both arms (and the base) together."""
     dt = model.opt.timestep
 
+    def should_stop() -> bool:
+        if stop_condition is None or not stop_condition():
+            return False
+        if base is not None and base.aid:
+            for aid, qidx in zip(base.aid, base.qidx):
+                data.ctrl[aid] = data.qpos[qidx]
+        return True
+
     for wp in waypoints:
+        if should_stop():
+            return False
         r_pos = resolve_target(wp.right_pos, model, data)
         l_pos = resolve_target(wp.left_pos, model, data)
 
@@ -185,6 +196,8 @@ def execute_bimanual_waypoints(
                 viewer.sync()
             if on_step is not None:
                 on_step()
+            if should_stop():
+                return False
 
         for aids, _, target in plans:
             for i, aid in enumerate(aids):
@@ -195,6 +208,8 @@ def execute_bimanual_waypoints(
                 viewer.sync()
             if on_step is not None:
                 on_step()
+            if should_stop():
+                return False
 
         if verbose:
             parts = []
@@ -207,6 +222,7 @@ def execute_bimanual_waypoints(
             if base is not None:
                 base_txt = f" base={np.array([data.qpos[q] for q in base.qidx]).round(3).tolist()}"
             print(f"  wp {wp.label:14s} {'  '.join(parts)} gripper={wp.gripper}{base_txt}")
+    return True
 
 
 def plan_error(model: mujoco.MjModel, data: mujoco.MjData, arm: ArmHandles,

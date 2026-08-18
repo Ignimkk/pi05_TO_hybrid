@@ -1,10 +1,9 @@
 """Realign parquet timestamps to match video PTS.
 
-Root cause (see conversation log): parquet 'timestamp' column stores raw
-sim time (data.time), which starts at ~1.5s (settle_scene offset) and
-steps at 0.068s (14.71Hz true rate, not the nominal 15Hz). Video is
-encoded at nominal 15fps CFR starting at t=0. This makes LeRobot's
-timestamp -> PTS video lookup return wrong frames.
+Root cause: parquet 'timestamp' can store raw simulation sampling time,
+whose step does not exactly equal 1 / nominal_fps when the number of physics
+steps per sample is rounded. Video is encoded at nominal CFR starting at t=0.
+This makes LeRobot's timestamp validation and timestamp -> PTS lookup fail.
 
 Physical alignment (which is what matters for training) is already
 correct: parquet row i, video frame i, and state[i]/action[i] all
@@ -16,6 +15,8 @@ the video PTS would report). Videos are left untouched. frame_index is
 unchanged.
 
 Idempotent: safe to run multiple times. Backups optional.
+By default backups are written next to the dataset root, never inside its
+``data/`` tree, so dataset loaders cannot mistake them for training shards.
 
 Usage:
     python patch_dataset_timestamps.py --dataset /root/work/pi05_TO_hybrid/data/rby1_dataset_v1
@@ -33,7 +34,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-def patch_one(path: Path, nominal_fps: float, make_backup: bool,
+def patch_one(path: Path, nominal_fps: float, backup_path: Path | None,
               dry_run: bool) -> tuple[int, float, float, float, float]:
     """Rewrite `timestamp` in one parquet. Return (n_rows, old_t0, old_t_last,
     new_t0, new_t_last) for diagnostics."""
@@ -45,10 +46,9 @@ def patch_one(path: Path, nominal_fps: float, make_backup: bool,
     if dry_run:
         return n, float(old_ts[0]), float(old_ts[-1]), float(new_ts[0]), float(new_ts[-1])
 
-    if make_backup:
-        bak = path.with_suffix(path.suffix + ".bak")
-        if not bak.exists():
-            shutil.copy2(path, bak)
+    if backup_path is not None and not backup_path.exists():
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, backup_path)
 
     cols = {name: table.column(name) for name in table.column_names}
     cols["timestamp"] = pa.array(new_ts, type=pa.float32())
@@ -63,20 +63,21 @@ def main():
     ap.add_argument("--fps", type=float, default=15.0,
                     help="Nominal fps (must match info.json + video encoder). Default 15.")
     ap.add_argument("--no-backup", action="store_true",
-                    help="Skip .bak files (saves ~2GB disk).")
+                    help="Skip the external timestamp-backup directory.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print planned changes for first / mid / last episodes and exit.")
     args = ap.parse_args()
 
     root = Path(args.dataset).resolve()
-    chunk_dir = root / "data" / "chunk-000"
-    parquets = sorted(chunk_dir.glob("episode_*.parquet"))
+    data_dir = root / "data"
+    parquets = sorted(data_dir.glob("chunk-*/episode_*.parquet"))
     if not parquets:
-        raise SystemExit(f"No parquet files under {chunk_dir}")
+        raise SystemExit(f"No parquet files under {data_dir}/chunk-*")
 
-    print(f"Patching {len(parquets)} parquet files under {chunk_dir}")
+    print(f"Patching {len(parquets)} parquet files under {data_dir}/chunk-*")
     print(f"  nominal fps      : {args.fps}")
-    print(f"  backup .bak      : {'skipped' if args.no_backup else 'yes'}")
+    backup_root = None if args.no_backup else root.parent / f"{root.name}_timestamp_backup"
+    print(f"  backup directory : {backup_root if backup_root else 'skipped'}")
     print(f"  dry run          : {args.dry_run}")
     print()
 
@@ -85,7 +86,7 @@ def main():
     print("Preview (first / mid / last):")
     for idx in preview_indices:
         n, o0, oL, n0, nL = patch_one(parquets[idx], args.fps,
-                                      make_backup=False, dry_run=True)
+                                      backup_path=None, dry_run=True)
         print(f"  ep {parquets[idx].name}: n={n:4d}  "
               f"old ts=[{o0:+.4f}, {oL:+.4f}]  -> new ts=[{n0:.4f}, {nL:.4f}]")
 
@@ -102,8 +103,9 @@ def main():
 
     total_rows = 0
     for i, p in enumerate(parquets):
+        backup_path = None if backup_root is None else backup_root / p.relative_to(data_dir)
         n, *_ = patch_one(p, args.fps,
-                          make_backup=not args.no_backup,
+                          backup_path=backup_path,
                           dry_run=False)
         total_rows += n
         if (i + 1) % 100 == 0:
@@ -113,7 +115,8 @@ def main():
     # Verify one file post-write
     verify_table = pq.read_table(parquets[0])
     v_ts = np.asarray(verify_table.column("timestamp"))
-    print(f"\nverify ep_000000: ts[0]={v_ts[0]:.4f}  ts[1]-ts[0]={v_ts[1]-v_ts[0]:.6f}  "
+    print(f"\nverify {parquets[0].name}: ts[0]={v_ts[0]:.4f}  "
+          f"ts[1]-ts[0]={v_ts[1]-v_ts[0]:.6f}  "
           f"ts[-1]={v_ts[-1]:.4f}  (expected step {1.0/args.fps:.6f})")
 
 

@@ -439,6 +439,31 @@ rby1_manipulation/
 | 스키마 확인 | `python ../../scripts/validate_dataset.py --dataset /tmp/ds17` | `state shape=(N, 17)`, `done.` |
 | 14-D 회귀 | `python -m rby1_manipulation.tasks.block_pick --headless --block red --log-dataset /tmp/ds14` | parquet이 `[14]`, `robot_type="rby1"` |
 
+### D-1. 고정 베이스 과일 적재·상자 들기 데이터셋 (14-D)
+
+새 collector는 wheel·베이스 이동·선반 배치·장애물을 사용하지 않습니다.
+동작과 waypoint 사이 대기는 검증된 기본 `1.25x` timing을 사용하며,
+`--speed-scale 1.0`으로 기존 timing을 재현할 수 있습니다.
+
+```bash
+# 1,200개 균형 schedule 확인
+python -m rby1_manipulation.data.collect_transport_dataset \
+  --output-dir /data/rby1_transport_14d --dry-run
+
+# 성공 episode 1,200개 수집
+python -m rby1_manipulation.data.collect_transport_dataset \
+  --output-dir /data/rby1_transport_14d
+```
+
+- `pack_only`, `lift_only`, `pack_and_lift`: 각 400개
+- 16개 fruit grid layout: 각 75개
+- 과일 종류, 적재 순서, 좌우 table slot 균형
+- `lift_only`: 사전 적재 0~4개를 각 80개
+- state/action: 기존 block과 같은 `rby1_14`
+
+상세 설계와 단일 episode 명령은
+[`docs/TRANSPORT_DATASET_14D_KO.md`](docs/TRANSPORT_DATASET_14D_KO.md)에 있습니다.
+
 ### E. 기존 파이프라인 회귀
 
 | 실험 | 명령어 | 합격 기준 |
@@ -549,3 +574,7 @@ gripper_width_from_qpos(data.qpos[arm.gripper_qidx])   # 현재 간격 읽기
 공유되며 `nq`가 바뀌어 기존 keyframe·데이터셋 인덱싱이 깨집니다.
 
 **데이터 수집에는 kinematic 모드(기본)를 사용하세요** — 베이스 포즈가 정확히 재현됩니다.
+
+정적·동적 장애물 profile, 충돌/최소거리 감시, wheel 사전점검과 현재 motion-test
+상태는 [`docs/RBY1_OBSTACLE_WHEEL_READINESS_KO.md`](../../docs/RBY1_OBSTACLE_WHEEL_READINESS_KO.md)에
+정리되어 있습니다. 장애물은 평가 전용이며 학습 데이터 수집에는 사용할 수 없습니다.

@@ -95,8 +95,8 @@ def main():
 
     # --- file existence check ---
     print("\nChecking parquet + mp4 files present...")
-    chunk_dir = root / "data" / "chunk-000"
-    parquets = {int(p.stem.split("_")[1]) for p in chunk_dir.glob("episode_*.parquet")}
+    parquet_files = sorted((root / "data").glob("chunk-*/episode_*.parquet"))
+    parquets = {int(p.stem.split("_")[1]) for p in parquet_files}
     ep_indices = {e["episode_index"] for e in episodes}
     missing_parquet = ep_indices - parquets
     orphan_parquet  = parquets - ep_indices
@@ -104,10 +104,14 @@ def main():
         print(f"  !! missing parquet for episodes: {sorted(missing_parquet)[:10]}...")
     if orphan_parquet:
         print(f"  !! orphan parquet with no episodes.jsonl entry: {sorted(orphan_parquet)[:10]}...")
+    if not missing_parquet and not orphan_parquet:
+        print(f"  parquet                : OK ({len(parquets)} episodes)")
 
     for cam in CAMERAS:
-        cam_dir = root / "videos" / "chunk-000" / f"observation.images.{cam}"
-        mp4s = {int(p.stem.split("_")[1]) for p in cam_dir.glob("episode_*.mp4")}
+        mp4_files = (root / "videos").glob(
+            f"chunk-*/observation.images.{cam}/episode_*.mp4"
+        )
+        mp4s = {int(p.stem.split("_")[1]) for p in mp4_files}
         missing = ep_indices - mp4s
         orphan  = mp4s - ep_indices
         status = "OK"
@@ -119,7 +123,7 @@ def main():
 
     # --- action/state sanity from ONE random episode ---
     print("\nSampling frames from first episode for sanity...")
-    first_parquet = next(iter(sorted(chunk_dir.glob("episode_*.parquet"))), None)
+    first_parquet = parquet_files[0] if parquet_files else None
     if first_parquet:
         table = pq.read_table(first_parquet,
                               columns=["observation.state", "action"])

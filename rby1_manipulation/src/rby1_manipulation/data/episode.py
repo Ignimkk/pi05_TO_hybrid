@@ -207,7 +207,10 @@ class LeRobotWriter:
             "next.done":         pa.array(next_done),
             "next.reward":       pa.array(next_reward),
         })
-        path = self.root / "data" / "chunk-000" / f"episode_{ep.episode_index:06d}.parquet"
+        chunk = ep.episode_index // CHUNK_SIZE
+        chunk_dir = self.root / "data" / f"chunk-{chunk:03d}"
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        path = chunk_dir / f"episode_{ep.episode_index:06d}.parquet"
         pq.write_table(table, path)
 
     def _write_videos(self, ep: EpisodeBuffer) -> None:
@@ -217,9 +220,15 @@ class LeRobotWriter:
             import imageio
         for cam in CAMERAS:
             frames = [f.images[cam] for f in ep.frames]
-            path = (self.root / "videos" / "chunk-000"
-                    / f"observation.images.{cam}"
-                    / f"episode_{ep.episode_index:06d}.mp4")
+            chunk = ep.episode_index // CHUNK_SIZE
+            video_dir = (
+                self.root
+                / "videos"
+                / f"chunk-{chunk:03d}"
+                / f"observation.images.{cam}"
+            )
+            video_dir.mkdir(parents=True, exist_ok=True)
+            path = video_dir / f"episode_{ep.episode_index:06d}.mp4"
             imageio.mimsave(str(path), frames, fps=self.fps,
                             codec="libx264", quality=8)
 
@@ -230,7 +239,10 @@ class LeRobotWriter:
             "total_episodes": len(self._episodes_written),
             "total_frames": sum(e["length"] for e in self._episodes_written),
             "total_tasks": len(self._task_to_index),
-            "total_chunks": 1,
+            "total_chunks": max(
+                1,
+                (len(self._episodes_written) + CHUNK_SIZE - 1) // CHUNK_SIZE,
+            ),
             "chunks_size": CHUNK_SIZE,
             "fps": self.fps,
             "splits": {"train": f"0:{len(self._episodes_written)}"},

@@ -1,0 +1,37 @@
+<mujocoinclude>
+  <!-- Evaluation-only obstacle slots.  They are mocap bodies so Python can
+       place static obstacles and prescribe dynamic trajectories without adding
+       qpos or actuators.  All slots start far outside the office and therefore
+       do not change the original transport task until explicitly activated. -->
+
+  <body name="obstacle_static_box_0" mocap="true" pos="8 8 2">
+    <geom class="prop_collision" name="obstacle_static_box_0_collision"
+          type="box" size="0.40 0.40 0.50" density="50"/>
+    <geom class="prop_visual" name="obstacle_static_box_0_visual"
+          type="box" size="0.40 0.40 0.50" rgba="0.82 0.46 0.12 1"/>
+  </body>
+  <body name="obstacle_static_box_1" mocap="true" pos="9 8 2">
+    <geom class="prop_collision" name="obstacle_static_box_1_collision"
+          type="box" size="0.40 0.40 0.50" density="50"/>
+    <geom class="prop_visual" name="obstacle_static_box_1_visual"
+          type="box" size="0.40 0.40 0.50" rgba="0.82 0.46 0.12 1"/>
+  </body>
+  <body name="obstacle_static_column_0" mocap="true" pos="10 8 2">
+    <geom class="prop_collision" name="obstacle_static_column_0_collision"
+          type="cylinder" size="0.35 0.80" density="50"/>
+    <geom class="prop_visual" name="obstacle_static_column_0_visual"
+          type="cylinder" size="0.35 0.80" rgba="0.95 0.75 0.12 1"/>
+  </body>
+  <body name="obstacle_dynamic_human_0" mocap="true" pos="11 8 2">
+    <geom class="prop_collision" name="obstacle_dynamic_human_0_collision"
+          type="capsule" size="0.25 0.75" density="50"/>
+    <geom class="prop_visual" name="obstacle_dynamic_human_0_visual"
+          type="capsule" size="0.25 0.75" rgba="0.18 0.48 0.86 1"/>
+  </body>
+  <body name="obstacle_dynamic_cart_0" mocap="true" pos="12 8 2">
+    <geom class="prop_collision" name="obstacle_dynamic_cart_0_collision"
+          type="box" size="0.50 0.35 0.50" density="50"/>
+    <geom class="prop_visual" name="obstacle_dynamic_cart_0_visual"
+          type="box" size="0.50 0.35 0.50" rgba="0.32 0.62 0.38 1"/>
+  </body>
+</mujocoinclude>

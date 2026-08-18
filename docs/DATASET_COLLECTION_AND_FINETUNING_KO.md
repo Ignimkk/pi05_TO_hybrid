@@ -1,5 +1,11 @@
 # RBY1 데이터셋 수집 및 π0.5 Fine-tuning
 
+> 이 문서는 기존 색상 블록 데이터셋 `rby1_dataset_v1`을 설명한다. 과일 적재 및
+> 상자 들기 데이터셋 `rby1_transport_14d`의 실제 1,200-episode 수집, GPU 서버
+> 전송, timestamp 보정, normalization 및 H200 학습 절차는
+> [`RBY1_TRANSPORT_14D_DATA_PIPELINE_KO.md`](RBY1_TRANSPORT_14D_DATA_PIPELINE_KO.md)를
+> 참고한다.
+
 ## 1. 개요
 
 본 프로젝트는 RBY1 양팔 로봇이 색깔 블록을 집어 갈색 상자에 넣는 작업을

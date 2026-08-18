@@ -143,6 +143,17 @@ def build_state_17(model: mujoco.MjModel, data: mujoco.MjData,
     ], dtype=np.float32)
 
 
+def build_state_14(data: mujoco.MjData,
+                   left: ArmHandles, right: ArmHandles) -> np.ndarray:
+    """Original fixed-base RBY1 layout used by the block datasets."""
+    return np.array([
+        *(data.qpos[q] for q in left.qidx[:6]),
+        abs(data.qpos[left.gripper_qidx]) / abs(GRIPPER_OPEN),
+        *(data.qpos[q] for q in right.qidx[:6]),
+        abs(data.qpos[right.gripper_qidx]) / abs(GRIPPER_OPEN),
+    ], dtype=np.float32)
+
+
 def build_action_17(model: mujoco.MjModel, data: mujoco.MjData,
                     left: ArmHandles, right: ArmHandles,
                     base: BaseHandles) -> np.ndarray:
@@ -161,6 +172,17 @@ def build_action_17(model: mujoco.MjModel, data: mujoco.MjData,
         *(data.ctrl[a] for a in right.aid[:6]),
         abs(data.ctrl[right.gripper_aid]) / abs(GRIPPER_OPEN),
         *base_cmd,
+    ], dtype=np.float32)
+
+
+def build_action_14(data: mujoco.MjData,
+                    left: ArmHandles, right: ArmHandles) -> np.ndarray:
+    """14-D commanded target matching :func:`build_state_14`."""
+    return np.array([
+        *(data.ctrl[a] for a in left.aid[:6]),
+        abs(data.ctrl[left.gripper_aid]) / abs(GRIPPER_OPEN),
+        *(data.ctrl[a] for a in right.aid[:6]),
+        abs(data.ctrl[right.gripper_aid]) / abs(GRIPPER_OPEN),
     ], dtype=np.float32)
 
 

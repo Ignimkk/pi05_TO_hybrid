@@ -2,7 +2,7 @@
 
 pi0.5 / openpi's LeRobotDataConfig relies on per-feature statistics for
 input normalization. This script scans every episode_XXXXXX.parquet in
-`data/chunk-000/` and produces LeRobot-compliant stats:
+`data/chunk-*/` and produces LeRobot-compliant stats:
 
   observation.state -> per-dim {min, max, mean, std, q01, q99}   (14,)
   action            -> per-dim {min, max, mean, std, q01, q99}   (14,)
@@ -52,9 +52,11 @@ def load_fail_task_indices(dataset_root: Path) -> set[int]:
 
 def collect_state_action(dataset_root: Path, skip_fail: bool) -> tuple[np.ndarray, np.ndarray, int]:
     """Return (all_states, all_actions, n_frames_used)."""
-    parquet_files = sorted((dataset_root / "data" / "chunk-000").glob("episode_*.parquet"))
+    parquet_files = sorted(
+        (dataset_root / "data").glob("chunk-*/episode_*.parquet")
+    )
     if not parquet_files:
-        raise SystemExit(f"No parquet files under {dataset_root}/data/chunk-000")
+        raise SystemExit(f"No parquet files under {dataset_root}/data/chunk-*")
 
     fail_indices = load_fail_task_indices(dataset_root) if skip_fail else set()
     if fail_indices:

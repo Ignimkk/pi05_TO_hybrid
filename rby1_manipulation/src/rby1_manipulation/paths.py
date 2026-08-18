@@ -15,7 +15,9 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = PACKAGE_DIR / "config"
 BLOCK_GRID_CONFIG = CONFIG_DIR / "grids" / "block_grid.json"
 BLOCK_FALSE_GRID_CONFIG = CONFIG_DIR / "grids" / "block_false_grid.json"
+FRUIT_GRID_CONFIG = CONFIG_DIR / "grids" / "fruit_grid.json"
 TRANSPORT_LAYOUT_CONFIG = CONFIG_DIR / "transport_layout.json"
+TRANSPORT_OBSTACLE_CONFIG = CONFIG_DIR / "transport_obstacles.json"
 
 
 def _description_root() -> Path:

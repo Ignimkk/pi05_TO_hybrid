@@ -10,6 +10,9 @@ existing names and 224x224 size so the observation interface is unchanged.
 """
 from __future__ import annotations
 
+import concurrent.futures
+import multiprocessing
+import os
 import pathlib
 from typing import Callable, Dict, Optional
 
@@ -19,6 +22,10 @@ import numpy as np
 from rby1_manipulation.data.episode import EpisodeBuffer, Frame, LeRobotWriter
 
 POLICY_IMAGE_SIZE = 224
+# Software OSMesa spends over half of policy-camera render time on scene
+# reflections. They are not task observations, so disable only that render flag
+# while preserving RGB resolution, camera poses, lighting, shadows, and FPS.
+POLICY_RENDER_REFLECTIONS = False
 RECORD_SIZE = (640, 480)
 # Third-person view, matching pi05_ex_infer's "front" preset.
 RECORD_LOOKAT = np.array([0.35, -0.6, 0.85])
@@ -28,6 +35,31 @@ RECORD_LOOKAT = np.array([0.35, -0.6, 0.85])
 RECORD_DISTANCE = 3.0
 RECORD_AZIMUTH = 150.0
 RECORD_ELEVATION = -20.0
+
+
+def _render_policy_camera(
+    model_xml_path: str,
+    logical_name: str,
+    camera_name: str,
+    qpos_sequence: np.ndarray,
+) -> tuple[str, list[np.ndarray]]:
+    """Render one policy camera in an isolated worker process."""
+    os.environ.setdefault("MUJOCO_GL", "osmesa")
+    model = mujoco.MjModel.from_xml_path(model_xml_path)
+    data = mujoco.MjData(model)
+    renderer = mujoco.Renderer(model, POLICY_IMAGE_SIZE, POLICY_IMAGE_SIZE)
+    images: list[np.ndarray] = []
+    try:
+        for qpos in qpos_sequence:
+            data.qpos[:] = qpos
+            mujoco.mj_forward(model, data)
+            renderer.update_scene(data, camera=camera_name)
+            if not POLICY_RENDER_REFLECTIONS:
+                renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = 0
+            images.append(renderer.render().copy())
+    finally:
+        renderer.close()
+    return logical_name, images
 
 
 class EpisodeRecorder:
@@ -46,14 +78,22 @@ class EpisodeRecorder:
         dataset_root: Optional[str] = None,
         fps: int = 15,
         schema: str = "rby1_17_mobile",
+        defer_policy_rendering: bool = False,
+        model_xml_path: Optional[str] = None,
     ):
         self.model, self.data = model, data
         self.state_fn, self.action_fn = state_fn, action_fn
         self.cam_name_map = cam_name_map
         self.fps = fps
         self.record_path = record_path
+        self.defer_policy_rendering = defer_policy_rendering
+        self.model_xml_path = model_xml_path
+        self._policy_qpos: list[np.ndarray] = []
         self._steps = 0
         self._every = max(1, int(round(1.0 / (fps * model.opt.timestep))))
+
+        if defer_policy_rendering and dataset_root is not None and model_xml_path is None:
+            raise ValueError("model_xml_path is required for deferred policy rendering")
 
         self.writer: Optional[LeRobotWriter] = None
         self.episode: Optional[EpisodeBuffer] = None
@@ -63,7 +103,10 @@ class EpisodeRecorder:
                                         image_wh=(POLICY_IMAGE_SIZE, POLICY_IMAGE_SIZE),
                                         schema=schema)
             self.episode = self.writer.new_episode(task=task)
-            self.policy_renderer = mujoco.Renderer(model, POLICY_IMAGE_SIZE, POLICY_IMAGE_SIZE)
+            if not defer_policy_rendering:
+                self.policy_renderer = mujoco.Renderer(
+                    model, POLICY_IMAGE_SIZE, POLICY_IMAGE_SIZE
+                )
 
         self.video_renderer: Optional[mujoco.Renderer] = None
         self.video_frames: list = []
@@ -83,18 +126,26 @@ class EpisodeRecorder:
         self._steps += 1
         if self._steps % self._every:
             return
-        t = self._steps * self.model.opt.timestep
-
-        if self.episode is not None and self.policy_renderer is not None:
-            images = {}
-            for logical, cam in self.cam_name_map.items():
-                self.policy_renderer.update_scene(self.data, camera=cam)
-                images[logical] = self.policy_renderer.render().copy()
+        if self.episode is not None:
+            images: Dict[str, np.ndarray] = {}
+            if self.defer_policy_rendering:
+                self._policy_qpos.append(self.data.qpos.copy())
+            elif self.policy_renderer is not None:
+                for logical, cam in self.cam_name_map.items():
+                    self.policy_renderer.update_scene(self.data, camera=cam)
+                    if not POLICY_RENDER_REFLECTIONS:
+                        self.policy_renderer.scene.flags[
+                            mujoco.mjtRndFlag.mjRND_REFLECTION
+                        ] = 0
+                    images[logical] = self.policy_renderer.render().copy()
             self.episode.append(Frame(
                 state=np.asarray(self.state_fn(), dtype=np.float32),
                 action=np.asarray(self.action_fn(), dtype=np.float32),
                 images=images,
-                timestamp=float(t),
+                # Videos are encoded at nominal CFR. Use their exact PTS grid
+                # rather than rounded physics-step time (e.g. 33 * 0.002 =
+                # 0.066, which does not satisfy a nominal 15 Hz timeline).
+                timestamp=float(len(self.episode) / self.fps),
                 frame_index=len(self.episode),
             ))
 
@@ -103,6 +154,46 @@ class EpisodeRecorder:
             self.video_frames.append(self.video_renderer.render().copy())
 
     # ---------- teardown ----------
+
+    def _render_deferred_images(self) -> None:
+        if not self.defer_policy_rendering or self.episode is None:
+            return
+        if len(self._policy_qpos) != len(self.episode):
+            raise RuntimeError(
+                "deferred render state count does not match recorded frame count"
+            )
+        if not self._policy_qpos:
+            return
+
+        qpos_sequence = np.stack(self._policy_qpos)
+        print(
+            f"    rendering {len(self.episode)} frames from "
+            f"{len(self.cam_name_map)} policy cameras in parallel ..."
+        )
+        context = multiprocessing.get_context("spawn")
+        rendered: Dict[str, list[np.ndarray]] = {}
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=len(self.cam_name_map), mp_context=context
+        ) as executor:
+            futures = [
+                executor.submit(
+                    _render_policy_camera,
+                    str(self.model_xml_path),
+                    logical,
+                    camera,
+                    qpos_sequence,
+                )
+                for logical, camera in self.cam_name_map.items()
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                logical, images = future.result()
+                rendered[logical] = images
+
+        for frame_index, frame in enumerate(self.episode.frames):
+            frame.images.update({
+                logical: rendered[logical][frame_index]
+                for logical in self.cam_name_map
+            })
 
     def finish(self, *, success: bool, save_failed: bool = False) -> None:
         if self.video_frames and self.record_path:
@@ -124,6 +215,7 @@ class EpisodeRecorder:
         if not success:
             # Same convention as collect_dataset.py so failures are filterable.
             self.episode.task = f"[FAIL] {self.episode.task}"
+        self._render_deferred_images()
         self.writer.save_episode(self.episode)
         self.writer.finalize()
         print(f"    episode {self.episode.episode_index} "

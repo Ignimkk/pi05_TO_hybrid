@@ -50,6 +50,15 @@ SHELF_APPROACH_DZ = 0.09
 SHELF_RETRACT_DZ = 0.12
 # Release height above the crate rim when dropping a small object inside.
 OBJECT_RELEASE_DZ = 0.03
+# The banana is low and curved: its mesh-derived 60% height (about 13 mm)
+# places the long fingertips through the tabletop. This floor keeps the finger
+# tips clear while still pinching below the banana's crown.
+OBJECT_GRASP_DZ_MIN = {"banana": 0.022}
+# A mesh-height fraction puts the pear grasp about 26 mm above its centre, on
+# the narrow neck. The pads initially touch but lose it as soon as the arm
+# lifts. Grasp the wider body instead; the tall pear still leaves ample table
+# clearance at this height.
+OBJECT_GRASP_DZ_OVERRIDE = {"pear": 0.015}
 
 
 @dataclass
@@ -76,9 +85,10 @@ def _live_handle_target(side: str, rot: mink.SO3, standoff: float):
 # ---------- crate phases ----------
 
 def crate_approach_waypoints(frames: GraspFrames, *,
-                             standoff: float = CRATE_APPROACH_STANDOFF) -> list[BiWaypoint]:
+                             standoff: float = CRATE_APPROACH_STANDOFF,
+                             trim: bool = False) -> list[BiWaypoint]:
     """Hover over both handles, then descend onto them with the grippers open."""
-    return [
+    waypoints = [
         BiWaypoint(
             "crate_hover",
             right_pos=_live_handle_target("right", frames.right, standoff),
@@ -94,6 +104,15 @@ def crate_approach_waypoints(frames: GraspFrames, *,
             gripper="open", duration=1.6, wait_after=0.3,
         ),
     ]
+    if trim:
+        waypoints.append(BiWaypoint(
+            "crate_grasp_trim",
+            right_pos=_live_handle_target("right", frames.right, 0.0),
+            left_pos=_live_handle_target("left", frames.left, 0.0),
+            right_quat=frames.right, left_quat=frames.left,
+            gripper="open", duration=1.0, wait_after=0.4,
+        ))
+    return waypoints
 
 
 def crate_lift_waypoints(model, data, frames: GraspFrames, *,
@@ -228,16 +247,28 @@ def object_grasp_dz(model, object_body: str, fraction: float = 0.6) -> float:
     sphere or a horizontal capsule, but size[2] for a box, whose size[0] is its
     long axis and would send the pads far above the object.
     """
+    if object_body in OBJECT_GRASP_DZ_OVERRIDE:
+        return OBJECT_GRASP_DZ_OVERRIDE[object_body]
+
     bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, object_body)
+    vertical_halves: list[float] = []
     for g in range(model.ngeom):
         if model.geom_bodyid[g] != bid or not model.geom_contype[g]:
             continue
         if model.geom_type[g] == mujoco.mjtGeom.mjGEOM_BOX:
             half = float(model.geom_size[g][2])
+        elif model.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH:
+            # geom_aabb = [centre xyz, half-size xyz] in the compiled geom
+            # frame. Include its centre offset because a decomposed mesh such
+            # as the banana has several vertically offset convex pieces.
+            half = abs(float(model.geom_aabb[g][2])) + float(model.geom_aabb[g][5])
         else:
             half = float(model.geom_size[g][0])
-        return fraction * half
-    raise KeyError(f"{object_body} has no collision geom")
+        vertical_halves.append(half)
+    if not vertical_halves:
+        raise KeyError(f"{object_body} has no collision geom")
+    mesh_height = fraction * max(vertical_halves)
+    return max(mesh_height, OBJECT_GRASP_DZ_MIN.get(object_body, mesh_height))
 
 
 def object_pick_waypoints(model, data, arm_side: str, frames: GraspFrames,
@@ -291,7 +322,9 @@ def object_pick_waypoints(model, data, arm_side: str, frames: GraspFrames,
 
 def object_into_crate_waypoints(model, data, arm_side: str, frames: GraspFrames, *,
                                 traverse_clearance: float = 0.14,
-                                release_dz: float = OBJECT_RELEASE_DZ) -> list[BiWaypoint]:
+                                release_dz: float = OBJECT_RELEASE_DZ,
+                                release_offset_xy: Sequence[float] = (0.0, 0.0),
+                                ) -> list[BiWaypoint]:
     """Lift the object, fly it over the handles, and stop just inside the rim.
 
     The traverse height is measured from the HANDLE TOP, not the crate rim. The
@@ -310,15 +343,20 @@ def object_into_crate_waypoints(model, data, arm_side: str, frames: GraspFrames,
     key = "right_pos" if arm_side == "right" else "left_pos"
     quat_key = "right_quat" if arm_side == "right" else "left_quat"
 
-    crate_pos = body_position(model, data, "crate")
+    crate_pos = body_position(model, data, CRATE_BODY)
+    offset_xy = np.asarray(release_offset_xy, dtype=float)
+    if offset_xy.shape != (2,):
+        raise ValueError("release_offset_xy must contain exactly [x, y]")
+    crate_R = body_rotation(model, data, CRATE_BODY)
+    release_offset_world = crate_R @ np.array([offset_xy[0], offset_xy[1], 0.0])
     ee_site = "right_ee" if arm_side == "right" else "left_ee"
     here = site_position(model, data, ee_site)
 
     handle_top_z = crate_pos[2] + CRATE_HANDLE_LOCAL_Z + 0.012
     rim_z = crate_pos[2] + CRATE_HALF[2]
     traverse_z = handle_top_z + traverse_clearance
-    over = np.array([crate_pos[0], crate_pos[1], traverse_z])
-    drop = np.array([crate_pos[0], crate_pos[1], rim_z + release_dz])
+    over = np.array([crate_pos[0], crate_pos[1], traverse_z]) + release_offset_world
+    drop = np.array([crate_pos[0], crate_pos[1], rim_z + release_dz]) + release_offset_world
     return [
         BiWaypoint("obj_lift",
                    **{key: np.array([here[0], here[1], traverse_z]), quat_key: rot},
