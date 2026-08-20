@@ -1,0 +1,35 @@
+<mujoco model="rby1_pick_place_static_obstacles">
+  <!-- Evaluation-only variant of model.xml.
+
+       Robot, cameras, blocks, keyframe, and ctrl 0..25 are identical to the
+       training scene.  Only parked mocap obstacle slots are appended, so the
+       14-D policy interface and nq/nv/nu remain unchanged. -->
+  <option timestep="0.002" solver="CG" iterations="30" tolerance="1e-6" />
+  <size nuserdata="144" />
+
+  <include file="./defaults_common.xml" />
+  <include file="./rby1.xml" />
+
+  <worldbody>
+    <body name="left_ee_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0"
+            rgba=".6 .3 .3 .2" group="3"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
+    </body>
+    <body name="right_ee_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0"
+            rgba=".6 .3 .3 .2" group="3"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
+    </body>
+    <include file="scenes/scene_blocks.xml"/>
+    <include file="scenes/pick_place_obstacles.xml"/>
+  </worldbody>
+
+  <keyframe>
+    <key name="teleop" qpos="0 0 0 0 0 0 0 0 0 0 0 -0.3 -0.3 -0.0 -1.95 -0.3 1.5 -1.57 0 0 -0.3 0.3 -0.0 -1.95 0.3 1.5 -1.57 0 0 0 0.7  0.55 -0.30 0.87 1 0 0 0  0.55 0.30 0.87 1 0 0 0  0.60 0.20 0.87 1 0 0 0"/>
+  </keyframe>
+
+  <actuator>
+    <include file="./actuators_arm.xml" />
+  </actuator>
+</mujoco>

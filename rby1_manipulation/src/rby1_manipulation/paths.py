@@ -17,7 +17,7 @@ BLOCK_GRID_CONFIG = CONFIG_DIR / "grids" / "block_grid.json"
 BLOCK_FALSE_GRID_CONFIG = CONFIG_DIR / "grids" / "block_false_grid.json"
 FRUIT_GRID_CONFIG = CONFIG_DIR / "grids" / "fruit_grid.json"
 TRANSPORT_LAYOUT_CONFIG = CONFIG_DIR / "transport_layout.json"
-TRANSPORT_OBSTACLE_CONFIG = CONFIG_DIR / "transport_obstacles.json"
+PICK_PLACE_OBSTACLE_CONFIG = CONFIG_DIR / "pick_place_obstacles.json"
 
 
 def _description_root() -> Path:
@@ -46,5 +46,9 @@ WORKSPACE_SRC_ROOT = DESCRIPTION_ROOT.parent
 WORKSPACE_ROOT = WORKSPACE_SRC_ROOT.parent
 MUJOCO_MODEL_DIR = DESCRIPTION_ROOT / "models" / "rby1a" / "mujoco"
 BLOCK_MODEL_XML = MUJOCO_MODEL_DIR / "model.xml"
+PICK_PLACE_OBSTACLE_MODEL_XML = MUJOCO_MODEL_DIR / "model_pick_place_obstacles.xml"
 TRANSPORT_MODEL_XML = MUJOCO_MODEL_DIR / "model_transport.xml"
+TRANSPORT_PICK_PLACE_OBSTACLE_MODEL_XML = (
+    MUJOCO_MODEL_DIR / "model_transport_pick_place_obstacles.xml"
+)
 TRANSPORT_WHEEL_MODEL_XML = MUJOCO_MODEL_DIR / "model_transport_wheels.xml"

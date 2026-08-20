@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import pathlib
 import sys
@@ -14,6 +15,32 @@ from PIL import Image
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODEL_XML = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml")
+MODEL_XML_PICK_PLACE_OBSTACLES = str(
+    REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco"
+    / "model_pick_place_obstacles.xml"
+)
+MODEL_XML_TRANSPORT = str(
+    REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco"
+    / "model_transport.xml"
+)
+MODEL_XML_TRANSPORT_PICK_PLACE_OBSTACLES = str(
+    REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco"
+    / "model_transport_pick_place_obstacles.xml"
+)
+MANIPULATION_SRC = REPO_ROOT / "rby1_manipulation" / "src"
+if str(MANIPULATION_SRC) not in sys.path:
+    sys.path.insert(0, str(MANIPULATION_SRC))
+
+from rby1_manipulation.simulation.pick_place_obstacles import (
+    PickPlaceObstacleManager,
+    load_pick_place_obstacle_config,
+)
+from rby1_manipulation.simulation.fruit_grid import (
+    OBJECT_TYPES as FRUIT_TYPES,
+    load_fruit_grid_config,
+    reset_fruit_grid_scene,
+)
+from rby1_manipulation.simulation.transport_scene import load_layout_config
 
 MODELS = {
     "droid": {
@@ -48,6 +75,13 @@ MODELS = {
         "checkpoint": "/mnt/dev/work/pi05_TO_hybrid/checkpoints/pi05_rby1_lora/full_run_30k/29999",
         "obs_format": "rby1",
         "action_format": "rby1",        # 14 = [L 6 abs joint, L grip, R 6 abs joint, R grip]
+    },
+    "rby1_transport_14d": {
+        "config": "pi05_rby1_lora",
+        "checkpoint": None,
+        "obs_format": "rby1",
+        "action_format": "rby1",
+        "model_xml": MODEL_XML_TRANSPORT,
     },
 }
 
@@ -378,6 +412,11 @@ def main():
     ap.add_argument("--remote", default=None,
                     help="host:port of a running scripts/serve_policy.py server; if set, "
                          "skips local model load and streams obs/actions over websocket instead")
+    ap.add_argument(
+        "--checkpoint",
+        default=None,
+        help="override the selected model's local checkpoint; unnecessary with --remote",
+    )
     ap.add_argument("--seam", action="store_true",
                     help="apply SEAM/VLS chunk-boundary smoothing. Local mode: wraps the in-process "
                          "policy. Remote mode: sends a seam_reset flag and assumes the server is "
@@ -392,13 +431,82 @@ def main():
                          "clock (physics run ~17x faster than real time otherwise), 0.5 is "
                          "half speed / slow motion, 0 disables pacing (run as fast as "
                          "possible, e.g. for --headless recording)")
+    ap.add_argument(
+        "--obstacle-profile",
+        default="clear",
+        help="static obstacle profile from pick_place_obstacles.json; use a fruit_* "
+             "profile with --model rby1_transport_14d",
+    )
+    ap.add_argument("--obstacle-config", type=pathlib.Path, default=None)
+    ap.add_argument("--obstacle-stop-distance", type=float, default=0.02)
+    ap.add_argument(
+        "--fruit-layout-index",
+        type=int,
+        default=None,
+        help="reset rby1_transport_14d to one of the 16 training fruit-grid layouts",
+    )
+    ap.add_argument(
+        "--fruit-slot-order",
+        nargs=4,
+        choices=FRUIT_TYPES,
+        default=None,
+        metavar=("FRUIT1", "FRUIT2", "FRUIT3", "FRUIT4"),
+        help="fruit permutation assigned to the four selected grid slots",
+    )
+    ap.add_argument(
+        "--fruit-preloaded",
+        nargs="*",
+        choices=FRUIT_TYPES,
+        default=None,
+        help="fruits initially placed inside the crate; requires --fruit-layout-index",
+    )
     args = ap.parse_args()
 
     if args.start_delay < 0:
         ap.error("--start-delay must be non-negative")
     if args.speed < 0:
         ap.error("--speed must be non-negative (0 = unlimited)")
+    if args.obstacle_stop_distance < 0:
+        ap.error("--obstacle-stop-distance must be non-negative")
+    if args.fruit_layout_index is not None and args.model != "rby1_transport_14d":
+        ap.error("--fruit-layout-index requires --model rby1_transport_14d")
+    if args.fruit_layout_index is None and (
+        args.fruit_slot_order is not None or args.fruit_preloaded is not None
+    ):
+        ap.error("--fruit-slot-order/--fruit-preloaded require --fruit-layout-index")
+    if args.fruit_slot_order is not None and len(set(args.fruit_slot_order)) != 4:
+        ap.error("--fruit-slot-order must contain each fruit exactly once")
+    if args.fruit_preloaded is not None and len(set(args.fruit_preloaded)) != len(
+        args.fruit_preloaded
+    ):
+        ap.error("--fruit-preloaded must not contain duplicates")
     mcfg = MODELS[args.model]
+    obstacle_config = load_pick_place_obstacle_config(args.obstacle_config) \
+        if args.obstacle_config else load_pick_place_obstacle_config()
+    if args.obstacle_profile not in obstacle_config["profiles"]:
+        ap.error(
+            f"unknown --obstacle-profile {args.obstacle_profile!r}; known: "
+            f"{tuple(obstacle_config['profiles'])}"
+        )
+    expected_obstacle_scene = (
+        "fruit" if args.model == "rby1_transport_14d" else "block"
+    )
+    profile_scene = obstacle_config["profiles"][args.obstacle_profile]["scene"]
+    if profile_scene not in ("any", expected_obstacle_scene):
+        ap.error(
+            f"--obstacle-profile {args.obstacle_profile!r} is for {profile_scene} scene; "
+            f"--model {args.model} uses {expected_obstacle_scene} scene"
+        )
+    if args.obstacle_profile != "clear" and args.model not in (
+        "rby1", "rby1_transport_14d"
+    ):
+        ap.error(
+            "static pick-place obstacles require --model rby1 or rby1_transport_14d"
+        )
+    if args.checkpoint:
+        mcfg = dict(mcfg, checkpoint=args.checkpoint)
+    if not args.remote and not mcfg.get("checkpoint"):
+        ap.error(f"--model {args.model} requires --remote or --checkpoint")
     if args.record_inputs and mcfg["obs_format"] not in ("aloha", "rby1"):
         ap.error("--record-inputs requires --model aloha or --model rby1")
     if args.trajectory_out and mcfg["obs_format"] != "rby1":
@@ -412,10 +520,35 @@ def main():
     print(f"  obs_format : {mcfg['obs_format']}")
     print(f"  act_format : {mcfg['action_format']}")
 
-    m = mujoco.MjModel.from_xml_path(MODEL_XML)
+    if args.obstacle_profile == "clear":
+        model_xml = mcfg.get("model_xml", MODEL_XML)
+    elif args.model == "rby1_transport_14d":
+        model_xml = MODEL_XML_TRANSPORT_PICK_PLACE_OBSTACLES
+    else:
+        model_xml = MODEL_XML_PICK_PLACE_OBSTACLES
+    m = mujoco.MjModel.from_xml_path(model_xml)
     d = mujoco.MjData(m)
     key = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "teleop")
     mujoco.mj_resetDataKeyframe(m, d, key)
+    fruit_scene = None
+    if args.fruit_layout_index is not None:
+        try:
+            fruit_scene = reset_fruit_grid_scene(
+                m,
+                d,
+                load_layout_config(),
+                load_fruit_grid_config(),
+                layout_index=args.fruit_layout_index,
+                slot_order=args.fruit_slot_order or FRUIT_TYPES,
+                preloaded_objects=args.fruit_preloaded or (),
+                settle_seconds=1.5,
+            )
+        except ValueError as exc:
+            ap.error(str(exc))
+        print(
+            f"  fruit reset: layout={fruit_scene.layout_index} "
+            f"slots={fruit_scene.slot_order} preloaded={fruit_scene.preloaded_objects}"
+        )
     # Without this, body/geom world transforms (xpos/xquat) are stale until the first
     # mj_step -- the very first observation (which drives the first action chunk) would
     # be rendered from a blank/garbage scene.
@@ -423,6 +556,28 @@ def main():
 
     for i in range(m.nu):
         d.ctrl[i] = d.qpos[m.jnt_qposadr[m.actuator_trnid[i, 0]]]
+
+    obstacle_manager = None
+    if args.obstacle_profile != "clear":
+        obstacle_manager = PickPlaceObstacleManager(m, d, obstacle_config)
+        obstacle_manager.activate(args.obstacle_profile)
+        initial_robot_clearance = obstacle_manager.robot_clearance()
+        initial_object_clearance = obstacle_manager.object_clearance()
+        if initial_robot_clearance <= args.obstacle_stop_distance:
+            ap.error(
+                f"obstacle profile starts inside the {args.obstacle_stop_distance:.3f} m "
+                f"robot safety margin (clearance={initial_robot_clearance:.3f} m)"
+            )
+        if initial_object_clearance <= 0.0:
+            ap.error(
+                "obstacle profile overlaps a movable object at reset "
+                f"(clearance={initial_object_clearance:.3f} m)"
+            )
+        print(
+            f"  obstacles  : {args.obstacle_profile} {obstacle_manager.active_slots} "
+            f"(initial robot/object clearance {initial_robot_clearance:.3f}/"
+            f"{initial_object_clearance:.3f} m)"
+        )
 
     # Build joint / actuator index maps once (used by build_obs and apply_action).
     idx = {
@@ -583,8 +738,20 @@ def main():
             action = np.asarray(chunk[chunk_step], dtype=np.float64)
             apply_action(mcfg["action_format"], action, d, idx, act)
 
-            for _ in range(steps_per_action):
+            obstacle_stopped = False
+            for sim_step in range(steps_per_action):
                 mujoco.mj_step(m, d)
+                if obstacle_manager is not None:
+                    obstacle_manager.observe_contacts()
+                    if sim_step % 5 == 0:
+                        clearance = obstacle_manager.robot_clearance()
+                        if (
+                            obstacle_manager.robot_collision
+                            or clearance <= args.obstacle_stop_distance
+                        ):
+                            obstacle_manager.hold_robot()
+                            obstacle_stopped = True
+                            break
             if ctx is not None:
                 ctx.sync()
 
@@ -605,6 +772,14 @@ def main():
                 executed_actions.append(action.copy())
                 measured_states.append(rby1_state())
 
+            if obstacle_stopped:
+                print(
+                    "[SAFETY] obstacle stop: "
+                    f"clearance={obstacle_manager.min_robot_clearance:.4f} m "
+                    f"collision={obstacle_manager.robot_collision}"
+                )
+                break
+
             chunk_step += 1
             if ctx is not None and not ctx.is_running():
                 break
@@ -615,6 +790,8 @@ def main():
     except KeyboardInterrupt:
         print("interrupted")
     finally:
+        if obstacle_manager is not None:
+            print(f"obstacle safety summary: {obstacle_manager.summary()}")
         if ctx is not None:
             ctx.close()
         if args.record and video_frames:
@@ -631,6 +808,10 @@ def main():
         if args.trajectory_out and executed_actions:
             trajectory_path = pathlib.Path(args.trajectory_out)
             trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+            condition = "seam" if args.seam else "baseline"
+            if args.obstacle_profile != "clear":
+                condition += f"__obstacle_{args.obstacle_profile}"
+            obstacle_summary = obstacle_manager.summary() if obstacle_manager else {}
             np.savez_compressed(
                 trajectory_path,
                 executed_actions=np.asarray(executed_actions, dtype=np.float64),
@@ -642,7 +823,19 @@ def main():
                 used_vls=np.asarray(inference_used_vls, dtype=bool),
                 chunk_indices=np.asarray(inference_chunk_indices, dtype=np.int64),
                 prompt=np.asarray(args.prompt),
-                condition=np.asarray("seam" if args.seam else "baseline"),
+                condition=np.asarray(condition),
+                obstacle_profile=np.asarray(args.obstacle_profile),
+                obstacle_safety_json=np.asarray(json.dumps(obstacle_summary)),
+                fruit_layout_index=np.asarray(
+                    fruit_scene.layout_index if fruit_scene is not None else -1,
+                    dtype=np.int64,
+                ),
+                fruit_slot_order=np.asarray(
+                    fruit_scene.slot_order if fruit_scene is not None else (),
+                ),
+                fruit_preloaded=np.asarray(
+                    fruit_scene.preloaded_objects if fruit_scene is not None else (),
+                ),
                 control_hz=np.asarray(CTRL_HZ, dtype=np.int64),
                 execution_length=np.asarray(OPEN_LOOP_HORIZON, dtype=np.int64),
             )

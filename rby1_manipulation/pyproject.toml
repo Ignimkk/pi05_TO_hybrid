@@ -31,7 +31,7 @@ rby1-follow-mocap = "rby1_manipulation.tools.follow_mocap:main"
 rby1-preview-block-grid = "rby1_manipulation.tools.preview_block_grid:main"
 rby1-preview-fruit-grid = "rby1_manipulation.tools.preview_fruit_grid:main"
 rby1-preview-transport-layout = "rby1_manipulation.tools.preview_transport_layout:main"
-rby1-preview-transport-obstacles = "rby1_manipulation.tools.preview_transport_obstacles:main"
+rby1-preview-pick-place-obstacles = "rby1_manipulation.tools.preview_pick_place_obstacles:main"
 rby1-check-wheel-drive = "rby1_manipulation.tools.check_wheel_drive:main"
 rby1-check-transport-scene = "rby1_manipulation.simulation.transport_scene:main"
 

@@ -1,0 +1,83 @@
+<mujocoinclude>
+  <!-- Static, table-mounted obstacles for block and fruit pick-and-place evaluation.
+
+       These are deliberately composed props rather than bare debug boxes:
+       two safety bollards and one low acrylic divider.  Each complete prop is
+       a mocap body, so a profile can place it without adding qpos, joints, or
+       actuators.  Collision geoms are hidden in group 3; visible geoms are
+       non-colliding and use group 2 like the rest of the scene. -->
+
+  <body name="pick_obstacle_bollard_0" mocap="true" pos="8 8 2">
+    <geom class="prop_collision" name="pick_obstacle_bollard_0_collision"
+          type="cylinder" size="0.027 0.1385" pos="0 0 0.1485"/>
+    <geom class="prop_collision" name="pick_obstacle_bollard_0_collision_foot"
+          type="cylinder" size="0.045 0.010" pos="0 0 0.010"/>
+    <geom class="prop_visual" name="pick_obstacle_bollard_0_foot"
+          type="cylinder" size="0.045 0.010" pos="0 0 0.010"
+          rgba="0.12 0.14 0.16 1"/>
+    <geom class="prop_visual" name="pick_obstacle_bollard_0_post"
+          type="cylinder" size="0.025 0.125" pos="0 0 0.135"
+          rgba="0.95 0.68 0.08 1"/>
+    <geom class="prop_visual" name="pick_obstacle_bollard_0_band_low"
+          type="cylinder" size="0.026 0.014" pos="0 0 0.080"
+          rgba="0.10 0.11 0.12 1"/>
+    <geom class="prop_visual" name="pick_obstacle_bollard_0_band_high"
+          type="cylinder" size="0.026 0.014" pos="0 0 0.190"
+          rgba="0.10 0.11 0.12 1"/>
+    <geom class="prop_visual" name="pick_obstacle_bollard_0_cap"
+          type="sphere" size="0.027" pos="0 0 0.260"
+          rgba="0.95 0.68 0.08 1"/>
+  </body>
+
+  <body name="pick_obstacle_bollard_1" mocap="true" pos="9 8 2">
+    <geom class="prop_collision" name="pick_obstacle_bollard_1_collision"
+          type="cylinder" size="0.027 0.1385" pos="0 0 0.1485"/>
+    <geom class="prop_collision" name="pick_obstacle_bollard_1_collision_foot"
+          type="cylinder" size="0.045 0.010" pos="0 0 0.010"/>
+    <geom class="prop_visual" name="pick_obstacle_bollard_1_foot"
+          type="cylinder" size="0.045 0.010" pos="0 0 0.010"
+          rgba="0.12 0.14 0.16 1"/>
+    <geom class="prop_visual" name="pick_obstacle_bollard_1_post"
+          type="cylinder" size="0.025 0.125" pos="0 0 0.135"
+          rgba="0.95 0.68 0.08 1"/>
+    <geom class="prop_visual" name="pick_obstacle_bollard_1_band_low"
+          type="cylinder" size="0.026 0.014" pos="0 0 0.080"
+          rgba="0.10 0.11 0.12 1"/>
+    <geom class="prop_visual" name="pick_obstacle_bollard_1_band_high"
+          type="cylinder" size="0.026 0.014" pos="0 0 0.190"
+          rgba="0.10 0.11 0.12 1"/>
+    <geom class="prop_visual" name="pick_obstacle_bollard_1_cap"
+          type="sphere" size="0.027" pos="0 0 0.260"
+          rgba="0.95 0.68 0.08 1"/>
+  </body>
+
+  <body name="pick_obstacle_divider_0" mocap="true" pos="10 8 2">
+    <geom class="prop_collision" name="pick_obstacle_divider_0_collision"
+          type="box" size="0.104 0.018 0.040" pos="0 0 0.040"/>
+    <geom class="prop_collision" name="pick_obstacle_divider_0_collision_foot_left"
+          type="box" size="0.030 0.040 0.006" pos="-0.085 0 0.006"/>
+    <geom class="prop_collision" name="pick_obstacle_divider_0_collision_foot_right"
+          type="box" size="0.030 0.040 0.006" pos="0.085 0 0.006"/>
+    <geom class="prop_visual" name="pick_obstacle_divider_0_panel"
+          type="box" size="0.090 0.007 0.030" pos="0 0 0.045"
+          rgba="0.18 0.76 0.92 0.50"/>
+    <geom class="prop_visual" name="pick_obstacle_divider_0_frame_left"
+          type="box" size="0.006 0.012 0.040" pos="-0.098 0 0.040"
+          rgba="0.68 0.72 0.76 1"/>
+    <geom class="prop_visual" name="pick_obstacle_divider_0_frame_right"
+          type="box" size="0.006 0.012 0.040" pos="0.098 0 0.040"
+          rgba="0.68 0.72 0.76 1"/>
+    <geom class="prop_visual" name="pick_obstacle_divider_0_rail_top"
+          type="box" size="0.100 0.012 0.005" pos="0 0 0.080"
+          rgba="0.68 0.72 0.76 1"/>
+    <geom class="prop_visual" name="pick_obstacle_divider_0_rail_bottom"
+          type="box" size="0.100 0.018 0.007" pos="0 0 0.007"
+          rgba="0.30 0.33 0.36 1"/>
+    <geom class="prop_visual" name="pick_obstacle_divider_0_foot_left"
+          type="box" size="0.030 0.040 0.006" pos="-0.085 0 0.006"
+          rgba="0.30 0.33 0.36 1"/>
+    <geom class="prop_visual" name="pick_obstacle_divider_0_foot_right"
+          type="box" size="0.030 0.040 0.006" pos="0.085 0 0.006"
+          rgba="0.30 0.33 0.36 1"/>
+  </body>
+</mujocoinclude>

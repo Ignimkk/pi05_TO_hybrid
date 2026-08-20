@@ -1,0 +1,57 @@
+<mujoco model="rby1_transport_14d_static_obstacles">
+  <!-- Fixed-base fruit packing / crate-lift inference variant.
+
+       This is model_transport.xml plus static table-obstacle mocap slots.  It
+       keeps the same 66/61/29 model dimensions and ctrl ordering.  A 14-D
+       policy controls only arms and grippers; base actuators remain held at the
+       teleop pose. -->
+  <option timestep="0.002" solver="CG" iterations="30" tolerance="1e-6" impratio="10" />
+  <size nuserdata="144" />
+
+  <include file="./defaults_common.xml" />
+  <include file="./rby1.xml" />
+
+  <asset>
+    <include file="scenes/office_assets.xml" />
+    <include file="scenes/transport_prop_assets.xml" />
+  </asset>
+
+  <worldbody>
+    <body name="left_ee_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0"
+            rgba=".6 .3 .3 .2" group="3"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
+    </body>
+    <body name="right_ee_target" pos="0.5 0 .5" quat="0 1 0 0" mocap="true">
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0"
+            rgba=".6 .3 .3 .2" group="3"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="4"/>
+    </body>
+    <include file="scenes/scene_transport.xml"/>
+    <include file="scenes/pick_place_obstacles.xml"/>
+  </worldbody>
+
+  <contact>
+    <exclude body1="world" body2="base"/>
+    <exclude body1="world" body2="wheel_r"/>
+    <exclude body1="world" body2="wheel_l"/>
+  </contact>
+
+  <keyframe>
+    <key name="teleop" qpos="0 0 0 0 0
+                             0 0 0 0 0 0
+                             -0.3 -0.3 -0.0 -1.95 -0.3 1.5 -1.57 0 0
+                             -0.3 0.3 -0.0 -1.95 0.3 1.5 -1.57 0 0
+                             0 0.7
+                             0.52 0.0 0.880 1 0 0 0
+                             0.46 -0.31 0.852 1 0 0 0
+                             0.46 0.31 0.842 1 0 0 0
+                             0.55 -0.31 0.850 1 0 0 0
+                             0.55 0.31 0.856 1 0 0 0"/>
+  </keyframe>
+
+  <actuator>
+    <include file="./actuators_arm.xml" />
+    <include file="./actuators_base.xml" />
+  </actuator>
+</mujoco>

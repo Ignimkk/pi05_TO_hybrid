@@ -64,11 +64,6 @@ from rby1_manipulation.simulation.transport_scene import (
     load_layout_config,
     reset_transport_scene,
 )
-from rby1_manipulation.simulation.obstacles import (
-    ObstacleCollisionMonitor,
-    TransportObstacleManager,
-    load_obstacle_config,
-)
 
 CAM_NAME_MAP = {
     "cam_high": "zed_left",
@@ -103,15 +98,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="gripper opening used for approach and release, as a "
                          "fraction of full stroke (1.0 = 86.4 mm, 0.5 = 41 mm)")
     ap.add_argument("--base-mode", choices=["kinematic", "wheel"], default="kinematic")
-    ap.add_argument("--obstacle-config", default=None)
-    ap.add_argument("--obstacle-profile", default="clear",
-                    help="evaluation-only profile: clear, static_offset, "
-                         "static_blocked, dynamic_crossing, or mixed")
     return ap
 
 
 def drive_to_shelf(model, data, config, base, wheel_mode, *,
-                   right, left, rmask, lmask, kw, safety_stop=None) -> bool:
+                   right, left, rmask, lmask, kw) -> bool:
     """Move the base to the shelf dock, holding whatever the arms are carrying.
 
     Kinematic mode ramps the base position servos through the waypoint list.
@@ -124,14 +115,14 @@ def drive_to_shelf(model, data, config, base, wheel_mode, *,
         return execute_bimanual_waypoints(
             model, data, right_arm=right, left_arm=left,
             right_mask=rmask, left_mask=lmask, waypoints=waypoints, base=base,
-            stop_condition=safety_stop, **kw,
+            **kw,
         )
     from rby1_manipulation.control.mobile_base import drive_base_with_wheels
     reached = True
     for wp in waypoints:
         result = drive_base_with_wheels(
             model, data, base, wp.base, wp.duration,
-            safety_stop=safety_stop, return_result=True, **kw
+            return_result=True, **kw
         )
         print(f"  wp {wp.label:14s} [wheel] pose error "
               f"x={result.error[0]:+.3f} y={result.error[1]:+.3f} "
@@ -152,17 +143,6 @@ def main() -> int:
         wheel_mode_banner()
 
     config = load_layout_config(args.config) if args.config else load_layout_config()
-    obstacle_config = load_obstacle_config(args.obstacle_config) \
-        if args.obstacle_config else load_obstacle_config()
-    if args.obstacle_profile not in obstacle_config["profiles"]:
-        raise SystemExit(
-            f"unknown --obstacle-profile {args.obstacle_profile!r}; known: "
-            f"{tuple(obstacle_config['profiles'])}"
-        )
-    if args.log_dataset and args.obstacle_profile != "clear":
-        raise SystemExit(
-            "obstacle profiles are evaluation-only and cannot be combined with --log-dataset"
-        )
     model = mujoco.MjModel.from_xml_path(MODEL_XML_WHEELS if wheel_mode else MODEL_XML)
     data = mujoco.MjData(model)
 
@@ -182,10 +162,6 @@ def main() -> int:
         spec.target_level = args.level
 
     state = reset_transport_scene(model, data, config, rng=rng, randomize=spec)
-    obstacles = TransportObstacleManager(model, data, obstacle_config)
-    obstacles.activate(args.obstacle_profile)
-    obstacle_monitor = ObstacleCollisionMonitor(model, data, obstacles)
-    obstacle_start_time = float(data.time)
 
     object_body = OBJECT_BODIES[args.object]
     obj_pos = body_position(model, data, object_body)
@@ -197,8 +173,6 @@ def main() -> int:
     print(f"  {args.object:7s} {obj_pos.round(3).tolist()} -> {arm_side} arm")
     print(f"  crate  {state.crate_pose[:3].round(3).tolist()}  mass {state.crate_mass:.3f} kg")
     print(f"  shelf  {state.shelf_pos.round(3).tolist()}  dock {state.dock_pose.round(3).tolist()}")
-    print(f"  obstacles    {args.obstacle_profile}: "
-          f"{tuple(obstacles.active)}")
 
     right, left = right_arm_handles(model), left_arm_handles(model)
     base = base_handles(model, require_actuators=not wheel_mode)
@@ -220,23 +194,8 @@ def main() -> int:
         )
         logger = recorder.on_step
 
-    def on_step() -> None:
-        obstacles.update(float(data.time) - obstacle_start_time)
-        obstacle_monitor.observe()
-        obstacle_monitor.observe_base_clearance(
-            [data.qpos[base.qidx[0]], data.qpos[base.qidx[1]]]
-        )
-        if logger is not None:
-            logger()
-
-    def print_obstacle_metrics() -> None:
-        print(f"    obstacle collision={obstacle_monitor.collided} "
-              f"contact_steps={obstacle_monitor.contact_steps} "
-              f"min_clearance={obstacle_monitor.min_planar_clearance:.3f} m "
-              f"pairs={tuple(sorted(obstacle_monitor.geom_pairs))}")
-
     def run(viewer=None) -> bool:
-        kw = dict(viewer=viewer, on_step=on_step)
+        kw = dict(viewer=viewer, on_step=logger)
         ex = lambda wps: execute_bimanual_waypoints(
             model, data, right_arm=right, left_arm=left,
             right_mask=rmask, left_mask=lmask, waypoints=wps, base=base, **kw)
@@ -267,19 +226,12 @@ def main() -> int:
         print("--- phase 4: lift and drive to the shelf ---")
         ex(crate_lift_waypoints(model, data, frames, clear_z=config["carry"]["clear_z"]))
         print(f"    crate z={body_position(model, data, CRATE_BODY)[2]:.3f}")
-        def navigation_stop() -> bool:
-            base_xy = [data.qpos[base.qidx[0]], data.qpos[base.qidx[1]]]
-            clearance = obstacle_monitor.observe_base_clearance(base_xy)
-            return obstacle_monitor.collided or clearance < 0.05
-
         drive_ok = drive_to_shelf(
             model, data, config, base, wheel_mode,
             right=right, left=left, rmask=rmask, lmask=lmask, kw=kw,
-            safety_stop=navigation_stop,
         )
-        if not drive_ok or obstacle_monitor.collided:
+        if not drive_ok:
             print("--- navigation aborted: place phase skipped ---")
-            print_obstacle_metrics()
             return False
 
         print("--- phase 5: place on the shelf ---")
@@ -295,8 +247,7 @@ def main() -> int:
         print(f"    xy_err={shelf.xy_err:.3f} z_err={shelf.z_err:.3f} "
               f"tilt={shelf.tilt_deg:.1f}deg speed={shelf.speed:.4f}")
         print(f"    {args.object} still in crate = {still_packed}")
-        print_obstacle_metrics()
-        return shelf.ok and still_packed and drive_ok and not obstacle_monitor.collided
+        return shelf.ok and still_packed and drive_ok
 
     if args.headless:
         success = run(None)

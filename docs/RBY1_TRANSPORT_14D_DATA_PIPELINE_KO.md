@@ -811,9 +811,9 @@ offline dataset replay
 → pack_and_lift
 ```
 
-장애물 회피는 이번 학습 데이터에 포함되지 않았으므로 별도 safety/planning layer로
-평가한다. 구현된 평가 obstacle profile과 wheel 준비 상태는
-[`RBY1_OBSTACLE_WHEEL_READINESS_KO.md`](RBY1_OBSTACLE_WHEEL_READINESS_KO.md)를 참고한다.
+장애물 회피는 이번 학습 데이터에 포함되지 않았다. 현재 장애물 평가는 wheel 주행과
+분리된 14-D 과일–상자 및 기존 block pick-and-place 정적 장면에서 진행하며,
+[`RBY1_STATIC_PICK_PLACE_OBSTACLES_KO.md`](RBY1_STATIC_PICK_PLACE_OBSTACLES_KO.md)를 참고한다.
 
 ---
 
@@ -878,4 +878,4 @@ tail -n 100 /mnt/dev/work/pi05_TO_hybrid/logs/rby1_transport_norm.log
 | `openpi/src/openpi/training/config.py` | `pi05_rby1_lora` 설정 |
 | `rby1_manipulation/docs/TRANSPORT_DATASET_14D_KO.md` | 수집 schedule과 장면 설계 상세 |
 | `docs/RBY1_SIM_TO_REAL_CONTROL_INTERFACES_KO.md` | MuJoCo/SDK/ROS 2 제어 interface와 adapter |
-| `docs/RBY1_OBSTACLE_WHEEL_READINESS_KO.md` | 정적·동적 장애물 평가와 wheel readiness gate |
+| `docs/RBY1_STATIC_PICK_PLACE_OBSTACLES_KO.md` | 정적 과일/블록 pick-and-place 장애물과 추론 safety |

@@ -9,9 +9,9 @@
 실행 명령어는 [`src/rby1_manipulation/README.md`](../src/rby1_manipulation/README.md)의
 "검증 — 실험별 명령어" 절(A~G)에 정리되어 있습니다.
 
-학습 데이터 수집 이후 추가한 정적·동적 obstacle profile, 안전 정지, wheel
-readiness gate는 [장애물·wheel 준비 문서](RBY1_OBSTACLE_WHEEL_READINESS_KO.md)에
-별도로 정리되어 있습니다.
+정적 장애물 평가는 wheel 주행 scene과 분리하며, 현재 14-D 과일–상자 및 기존 블록
+pick-and-place scene에서 사용할 수 있습니다. 자세한 내용은
+[장애물 문서](RBY1_STATIC_PICK_PLACE_OBSTACLES_KO.md)에서 관리합니다.
 
 ---
 
@@ -45,7 +45,6 @@ readiness gate는 [장애물·wheel 준비 문서](RBY1_OBSTACLE_WHEEL_READINESS
 | `scenes/scene_transport.xml` | — | **사무실 공간** + 테이블 + 크레이트 + 과일 4종 + 3단 선반 |
 | `scenes/office_assets.xml` | 20 | 사무실 바닥/벽/트림/유리 재질 |
 | `scenes/transport_prop_assets.xml` | — | 과일 4종의 visual·collision OBJ와 material 등록 |
-| `scenes/transport_obstacles.xml` | — | 평가 전용 정적·동적 mocap obstacle slot |
 | `assets/transport_props/*.obj` | 17개 | 절차적으로 생성한 과일 visual mesh와 convex collision decomposition |
 | `model_transport.xml` | 80 | **기본 root** (kinematic 베이스) |
 | `model_transport_wheels.xml` | 68 | 휠 구동 variant |
@@ -55,9 +54,7 @@ readiness gate는 [장애물·wheel 준비 문서](RBY1_OBSTACLE_WHEEL_READINESS
 | 파일 | 줄수 | 역할 |
 |---|---:|---|
 | `config/transport_layout.json` | 크레이트/물체/선반/도킹 포즈 설정 |
-| `config/transport_obstacles.json` | clear/static/dynamic/mixed 평가 profile |
 | `simulation/transport_scene.py` | config 로드·검증, 리셋·랜덤화, 베이스 핸들, 17-D state/action |
-| `simulation/obstacles.py` | obstacle 배치·동작·거리·충돌 감시 |
 | `planning/transport.py` | 두 시나리오가 공유하는 웨이포인트 빌더 |
 | `control/bimanual.py` | 양팔 IK 래퍼, `BiWaypoint`, 웨이포인트 실행기 |
 | `control/motion.py` | 램프/홀드/adaptive close |

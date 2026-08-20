@@ -24,15 +24,27 @@ from PIL import Image
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODEL_XML = str(REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco" / "model.xml")
+MODEL_XML_PICK_PLACE_OBSTACLES = str(
+    REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco"
+    / "model_pick_place_obstacles.xml"
+)
 # The mobile crate-transport scene. Same robot, same cameras, plus the crate /
 # shelf / small objects and position actuators on the base (ctrl 26/27/28).
 MODEL_XML_TRANSPORT = str(REPO_ROOT / "rby1_description" / "models" / "rby1a"
                           / "mujoco" / "model_transport.xml")
+MODEL_XML_TRANSPORT_PICK_PLACE_OBSTACLES = str(
+    REPO_ROOT / "rby1_description" / "models" / "rby1a" / "mujoco"
+    / "model_transport_pick_place_obstacles.xml"
+)
 MANIPULATION_SRC = REPO_ROOT / "rby1_manipulation" / "src"
 if str(MANIPULATION_SRC) not in sys.path:
     sys.path.insert(0, str(MANIPULATION_SRC))
 
 from rby1_manipulation.simulation.transport_scene import BASE_ACTS, BASE_JOINTS
+from rby1_manipulation.simulation.pick_place_obstacles import (
+    PickPlaceObstacleManager,
+    load_pick_place_obstacle_config,
+)
 from rby1_manipulation.tools.preview_block_grid import (
     BLOCK_BODIES,
     COLORS as GRID_COLORS,
@@ -85,6 +97,15 @@ MODELS = {
         "checkpoint": None,
         "obs_format": "rby1_mobile",
         "action_format": "rby1_mobile",  # 17 = rby1 14 + [base_x, base_y, base_yaw]
+        "model_xml": MODEL_XML_TRANSPORT,
+    },
+    "rby1_transport_14d": {
+        # Fixed-base fruit packing / crate lifting dataset currently trained on
+        # the server. It uses the same 14-D arm+gripper interface as rby1.
+        "config": "pi05_rby1_lora",
+        "checkpoint": None,
+        "obs_format": "rby1",
+        "action_format": "rby1",
         "model_xml": MODEL_XML_TRANSPORT,
     },
 }
@@ -584,6 +605,11 @@ def main():
     ap.add_argument("--remote", default=None,
                     help="host:port of a running scripts/serve_policy.py server; if set, "
                          "skips local model load and streams obs/actions over websocket instead")
+    ap.add_argument(
+        "--checkpoint",
+        default=None,
+        help="override the selected model's local checkpoint; unnecessary with --remote",
+    )
     ap.add_argument("--seam", action="store_true",
                     help="apply SEAM/VLS chunk-boundary smoothing. Local mode: wraps the in-process "
                          "policy. Remote mode: sends a seam_reset flag and assumes the server is "
@@ -598,6 +624,19 @@ def main():
                          "clock (physics run ~17x faster than real time otherwise), 0.5 is "
                          "half speed / slow motion, 0 disables pacing (run as fast as "
                          "possible, e.g. for --headless recording)")
+    ap.add_argument(
+        "--obstacle-profile",
+        default="clear",
+        help="static obstacle profile from pick_place_obstacles.json; use a fruit_* "
+             "profile with --model rby1_transport_14d",
+    )
+    ap.add_argument("--obstacle-config", type=pathlib.Path, default=None)
+    ap.add_argument(
+        "--obstacle-stop-distance",
+        type=float,
+        default=0.02,
+        help="hold the robot when its collision geometry comes this close to an obstacle",
+    )
     ap.add_argument(
         "--grid-experiment",
         action="store_true",
@@ -670,6 +709,8 @@ def main():
         ap.error("--start-delay must be non-negative")
     if args.speed < 0:
         ap.error("--speed must be non-negative (0 = unlimited)")
+    if args.obstacle_stop_distance < 0:
+        ap.error("--obstacle-stop-distance must be non-negative")
     if args.grid_repeats < 1:
         ap.error("--grid-repeats must be >= 1")
     if args.trial_max_steps < 1:
@@ -693,6 +734,32 @@ def main():
             ap.error(f"{name} requires --grid-experiment")
 
     mcfg = MODELS[args.model]
+    obstacle_config = load_pick_place_obstacle_config(args.obstacle_config) \
+        if args.obstacle_config else load_pick_place_obstacle_config()
+    if args.obstacle_profile not in obstacle_config["profiles"]:
+        ap.error(
+            f"unknown --obstacle-profile {args.obstacle_profile!r}; known: "
+            f"{tuple(obstacle_config['profiles'])}"
+        )
+    expected_obstacle_scene = (
+        "fruit" if args.model == "rby1_transport_14d" else "block"
+    )
+    profile_scene = obstacle_config["profiles"][args.obstacle_profile]["scene"]
+    if profile_scene not in ("any", expected_obstacle_scene):
+        ap.error(
+            f"--obstacle-profile {args.obstacle_profile!r} is for {profile_scene} scene; "
+            f"--model {args.model} uses {expected_obstacle_scene} scene"
+        )
+    if args.obstacle_profile != "clear" and args.model not in (
+        "rby1", "rby1_transport_14d"
+    ):
+        ap.error(
+            "static pick-place obstacles require --model rby1 or rby1_transport_14d"
+        )
+    if args.checkpoint:
+        mcfg = dict(mcfg, checkpoint=args.checkpoint)
+    if not args.remote and not mcfg.get("checkpoint"):
+        ap.error(f"--model {args.model} requires --remote or --checkpoint")
     if args.record_inputs and mcfg["obs_format"] not in ("aloha", "rby1"):
         ap.error("--record-inputs requires --model aloha or --model rby1")
     if args.trajectory_out and mcfg["obs_format"] != "rby1":
@@ -715,7 +782,13 @@ def main():
 
     # The scene follows the model: rby1_mobile needs the transport root, which
     # also supplies the base actuators its action format writes to.
-    m = mujoco.MjModel.from_xml_path(mcfg.get("model_xml", MODEL_XML))
+    if args.obstacle_profile == "clear":
+        model_xml = mcfg.get("model_xml", MODEL_XML)
+    elif args.model == "rby1_transport_14d":
+        model_xml = MODEL_XML_TRANSPORT_PICK_PLACE_OBSTACLES
+    else:
+        model_xml = MODEL_XML_PICK_PLACE_OBSTACLES
+    m = mujoco.MjModel.from_xml_path(model_xml)
     d = mujoco.MjData(m)
     key = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "teleop")
     mujoco.mj_resetDataKeyframe(m, d, key)
@@ -726,6 +799,28 @@ def main():
 
     for i in range(m.nu):
         d.ctrl[i] = d.qpos[m.jnt_qposadr[m.actuator_trnid[i, 0]]]
+
+    obstacle_manager = None
+    if args.obstacle_profile != "clear":
+        obstacle_manager = PickPlaceObstacleManager(m, d, obstacle_config)
+        obstacle_manager.activate(args.obstacle_profile)
+        initial_clearance = obstacle_manager.robot_clearance()
+        initial_object_clearance = obstacle_manager.object_clearance()
+        if initial_clearance <= args.obstacle_stop_distance:
+            ap.error(
+                f"obstacle profile starts inside the {args.obstacle_stop_distance:.3f} m "
+                f"robot safety margin (clearance={initial_clearance:.3f} m)"
+            )
+        if initial_object_clearance <= 0.0:
+            ap.error(
+                "obstacle profile overlaps a movable object at reset "
+                f"(clearance={initial_object_clearance:.3f} m)"
+            )
+        print(
+            f"  obstacles  : {args.obstacle_profile} {obstacle_manager.active_slots} "
+            f"(initial robot/object clearance {initial_clearance:.3f}/"
+            f"{initial_object_clearance:.3f} m)"
+        )
 
     # Build joint / actuator index maps once (used by build_obs and apply_action).
     idx = {
@@ -900,8 +995,20 @@ def main():
             action = np.asarray(chunk[chunk_step], dtype=np.float64)
             apply_action(mcfg["action_format"], action, d, idx, act)
 
-            for _ in range(steps_per_action):
+            obstacle_stopped = False
+            for sim_step in range(steps_per_action):
                 mujoco.mj_step(m, d)
+                if obstacle_manager is not None:
+                    obstacle_manager.observe_contacts()
+                    if sim_step % 5 == 0:
+                        clearance = obstacle_manager.robot_clearance()
+                        if (
+                            obstacle_manager.robot_collision
+                            or clearance <= args.obstacle_stop_distance
+                        ):
+                            obstacle_manager.hold_robot()
+                            obstacle_stopped = True
+                            break
             if ctx is not None:
                 ctx.sync()
 
@@ -921,6 +1028,14 @@ def main():
             if collect_trajectory:
                 executed_actions.append(action.copy())
                 measured_states.append(rby1_state())
+
+            if obstacle_stopped:
+                print(
+                    "[SAFETY] obstacle stop: "
+                    f"clearance={obstacle_manager.min_robot_clearance:.4f} m "
+                    f"collision={obstacle_manager.robot_collision}"
+                )
+                return {"status": "obstacle_stop", "steps": t_step + 1}
 
             chunk_step += 1
             if ctx is not None and not ctx.is_running():
@@ -960,6 +1075,17 @@ def main():
                     errors.append(
                         f"{first_color}/{second_color} separation is only {separation:.4f} m"
                     )
+        if obstacle_manager is not None:
+            payload_clearance = obstacle_manager.object_clearance()
+            robot_clearance = obstacle_manager.robot_clearance()
+            if payload_clearance <= 0.005:
+                errors.append(
+                    f"obstacle starts only {payload_clearance:.4f} m from a block"
+                )
+            if robot_clearance <= args.obstacle_stop_distance:
+                errors.append(
+                    f"obstacle starts only {robot_clearance:.4f} m from the robot"
+                )
         return errors
 
     def make_grid_stop_check(color):
@@ -1022,6 +1148,8 @@ def main():
                 json.dump(config, stream, indent=2, ensure_ascii=False)
                 stream.write("\n")
         condition = "seam" if args.seam else "baseline"
+        if args.obstacle_profile != "clear":
+            condition += f"__obstacle_{args.obstacle_profile}"
         completed = (
             set()
             if args.no_grid_resume
@@ -1078,6 +1206,10 @@ def main():
                     settle_seconds=1.5,
                     on_step=(ctx.sync if ctx is not None else None),
                 )
+                if obstacle_manager is not None:
+                    # reset_and_place_trial resets all mocap bodies to their XML
+                    # defaults, so restore the selected evaluation profile.
+                    obstacle_manager.activate(args.obstacle_profile)
                 setup_errors = validate_grid_setup(color, requested, actual)
                 if not setup_errors:
                     break
@@ -1108,6 +1240,7 @@ def main():
                     "settled_xyz": actual_target.tolist(),
                     "prompt": prompt,
                     "condition": condition,
+                    "obstacle_profile": args.obstacle_profile,
                     "grid_fingerprint": grid_fingerprint,
                     "status": "setup_error",
                     "success": False,
@@ -1147,6 +1280,7 @@ def main():
                 "final_xyz": final_target.tolist(),
                 "prompt": prompt,
                 "condition": condition,
+                "obstacle_profile": args.obstacle_profile,
                 "grid_fingerprint": grid_fingerprint,
                 "status": status,
                 "success": success,
@@ -1166,6 +1300,8 @@ def main():
                 record["inference_ms_max"] = _json_float(np.max(inference_ms))
             record["num_chunks"] = len(predicted_chunks)
             record["num_vls_chunks"] = int(sum(inference_used_vls))
+            if obstacle_manager is not None:
+                record["obstacle_safety"] = obstacle_manager.summary()
 
             artifact_stem = f"{condition}_{trial_id}"
             if args.grid_record and video_frames:
@@ -1218,6 +1354,8 @@ def main():
     except KeyboardInterrupt:
         print("interrupted")
     finally:
+        if obstacle_manager is not None:
+            print(f"obstacle safety summary: {obstacle_manager.summary()}")
         if ctx is not None:
             ctx.close()
         if not args.grid_experiment and args.record and video_frames:
@@ -1225,6 +1363,9 @@ def main():
         if not args.grid_experiment and args.record_inputs:
             save_policy_input_videos(args.record_inputs, input_frame_buffers)
         if not args.grid_experiment and args.trajectory_out and executed_actions:
+            trajectory_condition = "seam" if args.seam else "baseline"
+            if args.obstacle_profile != "clear":
+                trajectory_condition += f"__obstacle_{args.obstacle_profile}"
             save_trajectory(
                 args.trajectory_out,
                 executed_actions=executed_actions,
@@ -1236,7 +1377,7 @@ def main():
                 inference_used_vls=inference_used_vls,
                 inference_chunk_indices=inference_chunk_indices,
                 prompt=args.prompt,
-                condition="seam" if args.seam else "baseline",
+                condition=trajectory_condition,
             )
 
 

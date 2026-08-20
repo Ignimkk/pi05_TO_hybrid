@@ -17,9 +17,11 @@ from rby1_manipulation.paths import (
     BLOCK_GRID_CONFIG,
     BLOCK_MODEL_XML,
     FRUIT_GRID_CONFIG,
-    TRANSPORT_OBSTACLE_CONFIG,
+    PICK_PLACE_OBSTACLE_CONFIG,
+    PICK_PLACE_OBSTACLE_MODEL_XML,
     TRANSPORT_LAYOUT_CONFIG,
     TRANSPORT_MODEL_XML,
+    TRANSPORT_PICK_PLACE_OBSTACLE_MODEL_XML,
     TRANSPORT_WHEEL_MODEL_XML,
 )
 from rby1_manipulation.planning.transport import object_grasp_dz
@@ -38,7 +40,7 @@ class PackageContractsTest(unittest.TestCase):
             BLOCK_GRID_CONFIG,
             FRUIT_GRID_CONFIG,
             TRANSPORT_LAYOUT_CONFIG,
-            TRANSPORT_OBSTACLE_CONFIG,
+            PICK_PLACE_OBSTACLE_CONFIG,
         ):
             self.assertTrue(path.is_file(), path)
             self.assertIsInstance(json.loads(path.read_text(encoding="utf-8")), dict)
@@ -46,7 +48,9 @@ class PackageContractsTest(unittest.TestCase):
     def test_mujoco_model_dimensions_are_unchanged(self) -> None:
         expected = {
             BLOCK_MODEL_XML: (52, 49, 26),
+            PICK_PLACE_OBSTACLE_MODEL_XML: (52, 49, 26),
             TRANSPORT_MODEL_XML: (66, 61, 29),
+            TRANSPORT_PICK_PLACE_OBSTACLE_MODEL_XML: (66, 61, 29),
             TRANSPORT_WHEEL_MODEL_XML: (66, 61, 26),
         }
         for path, dimensions in expected.items():

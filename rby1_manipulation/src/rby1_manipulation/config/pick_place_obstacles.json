@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "table_surface_z": 0.82,
+  "profiles": {
+    "clear": {
+      "scene": "any",
+      "description": "Original selected pick-and-place scene without obstacles.",
+      "obstacles": []
+    },
+    "right_bollard": {
+      "scene": "block",
+      "description": "A safety bollard on the nominal right-hand block-to-container path.",
+      "obstacles": [
+        {"slot": "bollard_0", "position": [0.550, -0.120, 0.82], "yaw": 0.0}
+      ]
+    },
+    "left_bollard": {
+      "scene": "block",
+      "description": "A safety bollard on the nominal left-hand block-to-container path.",
+      "obstacles": [
+        {"slot": "bollard_0", "position": [0.550, 0.120, 0.82], "yaw": 0.0}
+      ]
+    },
+    "right_divider": {
+      "scene": "block",
+      "description": "A low acrylic divider that requires the right-hand carry to pass over it.",
+      "obstacles": [
+        {"slot": "divider_0", "position": [0.590, -0.140, 0.82], "yaw": 0.0}
+      ]
+    },
+    "left_divider": {
+      "scene": "block",
+      "description": "A low acrylic divider that requires the left-hand carry to pass over it.",
+      "obstacles": [
+        {"slot": "divider_0", "position": [0.590, 0.140, 0.82], "yaw": 0.0}
+      ]
+    },
+    "dual_bollards": {
+      "scene": "block",
+      "description": "Symmetric bollards for mixed left/right inference evaluation.",
+      "obstacles": [
+        {"slot": "bollard_0", "position": [0.550, -0.120, 0.82], "yaw": 0.0},
+        {"slot": "bollard_1", "position": [0.550, 0.120, 0.82], "yaw": 0.0}
+      ]
+    },
+    "fruit_right_bollard": {
+      "scene": "fruit",
+      "description": "A tabletop post beside the right fruit pickup corridor.",
+      "obstacles": [
+        {"slot": "bollard_0", "position": [0.620, -0.250, 0.82], "yaw": 0.0}
+      ]
+    },
+    "fruit_left_bollard": {
+      "scene": "fruit",
+      "description": "A tabletop post beside the left fruit pickup corridor.",
+      "obstacles": [
+        {"slot": "bollard_0", "position": [0.620, 0.250, 0.82], "yaw": 0.0}
+      ]
+    },
+    "fruit_right_divider": {
+      "scene": "fruit",
+      "description": "A low divider bordering the right fruit pickup corridor.",
+      "obstacles": [
+        {"slot": "divider_0", "position": [0.770, -0.250, 0.82], "yaw": 0.0}
+      ]
+    },
+    "fruit_left_divider": {
+      "scene": "fruit",
+      "description": "A low divider bordering the left fruit pickup corridor.",
+      "obstacles": [
+        {"slot": "divider_0", "position": [0.770, 0.250, 0.82], "yaw": 0.0}
+      ]
+    },
+    "fruit_dual_bollards": {
+      "scene": "fruit",
+      "description": "Symmetric tabletop posts for mixed fruit packing instructions.",
+      "obstacles": [
+        {"slot": "bollard_0", "position": [0.620, -0.250, 0.82], "yaw": 0.0},
+        {"slot": "bollard_1", "position": [0.620, 0.250, 0.82], "yaw": 0.0}
+      ]
+    }
+  }
+}

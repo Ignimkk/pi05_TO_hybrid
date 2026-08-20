@@ -575,6 +575,6 @@ gripper_width_from_qpos(data.qpos[arm.gripper_qidx])   # 현재 간격 읽기
 
 **데이터 수집에는 kinematic 모드(기본)를 사용하세요** — 베이스 포즈가 정확히 재현됩니다.
 
-정적·동적 장애물 profile, 충돌/최소거리 감시, wheel 사전점검과 현재 motion-test
-상태는 [`docs/RBY1_OBSTACLE_WHEEL_READINESS_KO.md`](../../docs/RBY1_OBSTACLE_WHEEL_READINESS_KO.md)에
-정리되어 있습니다. 장애물은 평가 전용이며 학습 데이터 수집에는 사용할 수 없습니다.
+과일–상자 14-D 및 블록 pick-and-place용 정적 장애물, policy-camera preview, 실제 추론 CLI와 100Hz
+safety stop은 [`docs/RBY1_STATIC_PICK_PLACE_OBSTACLES_KO.md`](../../docs/RBY1_STATIC_PICK_PLACE_OBSTACLES_KO.md)에
+정리되어 있습니다. wheel·동적 장애물은 이 구현 범위에서 제외합니다.
