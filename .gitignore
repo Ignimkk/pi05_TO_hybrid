@@ -27,4 +27,6 @@ MUJOCO_LOG.TXT
 /checkpoints/
 outputs/
 /benchmark/
-/backup/
+/backups/
+/.cache/
+/lerobot_transport/
