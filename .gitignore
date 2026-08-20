@@ -27,3 +27,4 @@ MUJOCO_LOG.TXT
 /checkpoints/
 outputs/
 /benchmark/
+/backup/
