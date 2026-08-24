@@ -39,6 +39,7 @@ from rby1_manipulation.control.motion import (
     open_grippers,
     return_arms_to_rest,
     snapshot_rest_ctrl,
+    wait_arms_at_rest,
 )
 from rby1_manipulation.evaluation.transport import check_grasp, object_in_crate
 from rby1_manipulation.planning.transport import (
@@ -78,6 +79,8 @@ OBJECT_CLOSE_SETTLE_SECS = 0.40
 # only when the next fruit belongs to the opposite arm. This clears the shared
 # space above the crate without adding redundant home motions for same-arm runs.
 ARM_SWITCH_RETURN_SECS = 1.5
+ARM_REST_TOLERANCE_RAD = 0.02
+ARM_REST_SETTLE_TIMEOUT_SECS = 1.0
 CONTACT_MONITOR_HZ = 100.0
 CAM_NAME_MAP = {
     "cam_high": "zed_left",
@@ -481,6 +484,19 @@ def main() -> int:
                             duration=secs(ARM_SWITCH_RETURN_SECS),
                             **kwargs,
                         )
+                        rest_error = wait_arms_at_rest(
+                            model,
+                            data,
+                            [arms[arm_side]],
+                            rest_ctrl,
+                            tolerance=ARM_REST_TOLERANCE_RAD,
+                            timeout=ARM_REST_SETTLE_TIMEOUT_SECS,
+                            **kwargs,
+                        )
+                        print(
+                            f"    {arm_side} arm rest converged: "
+                            f"max joint error={rest_error:.5f} rad"
+                        )
 
         if args.task in ("lift_only", "pack_and_lift"):
             print("\n--- lift crate (fixed base; no shelf transport) ---")
@@ -488,6 +504,19 @@ def main() -> int:
                 print("    return both arms to the initial rest pose")
                 return_arms_to_rest(
                     model, data, [right, left], rest_ctrl, duration=secs(2.0), **kwargs
+                )
+                rest_error = wait_arms_at_rest(
+                    model,
+                    data,
+                    [right, left],
+                    rest_ctrl,
+                    tolerance=ARM_REST_TOLERANCE_RAD,
+                    timeout=ARM_REST_SETTLE_TIMEOUT_SECS,
+                    **kwargs,
+                )
+                print(
+                    "    both arms rest converged: "
+                    f"max joint error={rest_error:.5f} rad"
                 )
             hold_ctrl_for_secs(model, data, secs(1.5), **kwargs)
             crate_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, CRATE_BODY)

@@ -88,6 +88,40 @@ def return_arms_to_rest(model: mujoco.MjModel, data: mujoco.MjData,
             on_step()
 
 
+def wait_arms_at_rest(model: mujoco.MjModel, data: mujoco.MjData,
+                      arms: Sequence[ArmHandles], rest_ctrl: Dict[int, float], *,
+                      tolerance: float, timeout: float,
+                      viewer=None, on_step: Optional[Callable[[], None]] = None) -> float:
+    """Hold rest targets until measured arm qpos converges within tolerance."""
+    if tolerance <= 0.0:
+        raise ValueError("tolerance must be greater than zero")
+    if timeout <= 0.0:
+        raise ValueError("timeout must be greater than zero")
+    pairs = [
+        (aid, qidx)
+        for arm in arms
+        for aid, qidx in zip(arm.aid, arm.qidx)
+    ]
+    max_steps = max(1, int(round(timeout / model.opt.timestep)))
+    error = float("inf")
+    for _ in range(max_steps + 1):
+        error = max(
+            abs(float(data.qpos[qidx]) - float(rest_ctrl[aid]))
+            for aid, qidx in pairs
+        )
+        if error <= tolerance:
+            return error
+        mujoco.mj_step(model, data)
+        if viewer is not None:
+            viewer.sync()
+        if on_step is not None:
+            on_step()
+    raise RuntimeError(
+        f"arm failed to reach rest within {timeout:.2f}s: "
+        f"max joint error={error:.5f} rad > {tolerance:.5f} rad"
+    )
+
+
 def snapshot_rest_ctrl(data: mujoco.MjData, arms: Sequence[ArmHandles]) -> Dict[int, float]:
     return {aid: float(data.ctrl[aid]) for arm in arms for aid in arm.aid}
 

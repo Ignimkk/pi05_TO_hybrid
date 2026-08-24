@@ -69,6 +69,10 @@ class Frame:
     images: Dict[str, np.ndarray]          # cam name -> HxWx3 uint8
     timestamp: float
     frame_index: int
+    # Optional atomic-task annotations. Existing datasets omit the columns;
+    # atomic collectors enable them through LeRobotWriter(frame_metadata=True).
+    phase_index: int = -1
+    prompt_timestamp: float = 0.0
 
 
 @dataclass
@@ -97,7 +101,8 @@ class LeRobotWriter:
     """
 
     def __init__(self, root: str | pathlib.Path, *, fps: int,
-                 image_wh: tuple[int, int], schema: str = DEFAULT_SCHEMA):
+                 image_wh: tuple[int, int], schema: str = DEFAULT_SCHEMA,
+                 frame_metadata: bool = False):
         if schema not in SCHEMAS:
             raise ValueError(f"unknown schema {schema!r}; known: {sorted(SCHEMAS)}")
         spec = SCHEMAS[schema]
@@ -108,6 +113,7 @@ class LeRobotWriter:
         self.root = pathlib.Path(root)
         self.fps = fps
         self.image_w, self.image_h = image_wh
+        self.frame_metadata = frame_metadata
         self._episodes_written: List[Dict[str, Any]] = []
         self._task_to_index: Dict[str, int] = {}
 
@@ -194,7 +200,7 @@ class LeRobotWriter:
         next_done    = np.zeros(n, dtype=bool); next_done[-1] = True
         next_reward  = np.zeros(n, dtype=np.float32)
 
-        table = pa.table({
+        columns = {
             "observation.state": pa.array(state.tolist(),
                                           type=pa.list_(pa.float32(), self.state_dim)),
             "action":            pa.array(action.tolist(),
@@ -206,7 +212,15 @@ class LeRobotWriter:
             "task_index":        pa.array(task_idx),
             "next.done":         pa.array(next_done),
             "next.reward":       pa.array(next_reward),
-        })
+        }
+        if self.frame_metadata:
+            columns["phase_index"] = pa.array(
+                np.asarray([frame.phase_index for frame in ep.frames], dtype=np.int64)
+            )
+            columns["prompt_timestamp"] = pa.array(
+                np.asarray([frame.prompt_timestamp for frame in ep.frames], dtype=np.float32)
+            )
+        table = pa.table(columns)
         chunk = ep.episode_index // CHUNK_SIZE
         chunk_dir = self.root / "data" / f"chunk-{chunk:03d}"
         chunk_dir.mkdir(parents=True, exist_ok=True)
@@ -266,7 +280,7 @@ class LeRobotWriter:
             }
             for cam in CAMERAS
         }
-        return {
+        features = {
             **images,
             "observation.state": {"dtype": "float32", "shape": [self.state_dim],
                                   "names": list(self.feature_names)},
@@ -280,6 +294,16 @@ class LeRobotWriter:
             "next.done":     {"dtype": "bool",    "shape": [1], "names": ["done"]},
             "next.reward":   {"dtype": "float32", "shape": [1], "names": ["reward"]},
         }
+        if self.frame_metadata:
+            features.update({
+                "phase_index": {
+                    "dtype": "int64", "shape": [1], "names": ["phase_index"]
+                },
+                "prompt_timestamp": {
+                    "dtype": "float32", "shape": [1], "names": ["prompt_timestamp"]
+                },
+            })
+        return features
 
     def _write_episodes_jsonl(self) -> None:
         with open(self.root / "meta" / "episodes.jsonl", "w") as f:

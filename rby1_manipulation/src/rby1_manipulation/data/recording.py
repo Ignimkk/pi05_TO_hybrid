@@ -18,10 +18,17 @@ from typing import Callable, Dict, Optional
 
 import mujoco
 import numpy as np
+from PIL import Image
 
 from rby1_manipulation.data.episode import EpisodeBuffer, Frame, LeRobotWriter
 
 POLICY_IMAGE_SIZE = 224
+# Render with the physical camera's 4:3 field of view, then resize to the
+# square tensor consumed by the policy. Rendering MuJoCo directly at 224x224
+# changes the horizontal field of view (90 degrees instead of about 106 degrees
+# for fovy=90), cropping the fingers and nearby objects from wrist views.
+POLICY_SOURCE_HEIGHT = POLICY_IMAGE_SIZE
+POLICY_SOURCE_WIDTH = round(POLICY_IMAGE_SIZE * 4 / 3)
 # Software OSMesa spends over half of policy-camera render time on scene
 # reflections. They are not task observations, so disable only that render flag
 # while preserving RGB resolution, camera poses, lighting, shadows, and FPS.
@@ -37,6 +44,16 @@ RECORD_AZIMUTH = 150.0
 RECORD_ELEVATION = -20.0
 
 
+def resize_policy_image(image: np.ndarray) -> np.ndarray:
+    """Resize a native 4:3 camera frame to the policy's 224x224 tensor."""
+    return np.asarray(
+        Image.fromarray(image).resize(
+            (POLICY_IMAGE_SIZE, POLICY_IMAGE_SIZE),
+            resample=Image.Resampling.BILINEAR,
+        )
+    )
+
+
 def _render_policy_camera(
     model_xml_path: str,
     logical_name: str,
@@ -47,7 +64,9 @@ def _render_policy_camera(
     os.environ.setdefault("MUJOCO_GL", "osmesa")
     model = mujoco.MjModel.from_xml_path(model_xml_path)
     data = mujoco.MjData(model)
-    renderer = mujoco.Renderer(model, POLICY_IMAGE_SIZE, POLICY_IMAGE_SIZE)
+    renderer = mujoco.Renderer(
+        model, height=POLICY_SOURCE_HEIGHT, width=POLICY_SOURCE_WIDTH
+    )
     images: list[np.ndarray] = []
     try:
         for qpos in qpos_sequence:
@@ -56,7 +75,7 @@ def _render_policy_camera(
             renderer.update_scene(data, camera=camera_name)
             if not POLICY_RENDER_REFLECTIONS:
                 renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = 0
-            images.append(renderer.render().copy())
+            images.append(resize_policy_image(renderer.render()))
     finally:
         renderer.close()
     return logical_name, images
@@ -80,6 +99,8 @@ class EpisodeRecorder:
         schema: str = "rby1_17_mobile",
         defer_policy_rendering: bool = False,
         model_xml_path: Optional[str] = None,
+        phase_fn: Optional[Callable[[], int]] = None,
+        prompt_timestamp: float = 0.0,
     ):
         self.model, self.data = model, data
         self.state_fn, self.action_fn = state_fn, action_fn
@@ -88,6 +109,8 @@ class EpisodeRecorder:
         self.record_path = record_path
         self.defer_policy_rendering = defer_policy_rendering
         self.model_xml_path = model_xml_path
+        self.phase_fn = phase_fn
+        self.prompt_timestamp = float(prompt_timestamp)
         self._policy_qpos: list[np.ndarray] = []
         self._steps = 0
         self._every = max(1, int(round(1.0 / (fps * model.opt.timestep))))
@@ -101,11 +124,14 @@ class EpisodeRecorder:
         if dataset_root is not None:
             self.writer = LeRobotWriter(dataset_root, fps=fps,
                                         image_wh=(POLICY_IMAGE_SIZE, POLICY_IMAGE_SIZE),
-                                        schema=schema)
+                                        schema=schema,
+                                        frame_metadata=phase_fn is not None)
             self.episode = self.writer.new_episode(task=task)
             if not defer_policy_rendering:
                 self.policy_renderer = mujoco.Renderer(
-                    model, POLICY_IMAGE_SIZE, POLICY_IMAGE_SIZE
+                    model,
+                    height=POLICY_SOURCE_HEIGHT,
+                    width=POLICY_SOURCE_WIDTH,
                 )
 
         self.video_renderer: Optional[mujoco.Renderer] = None
@@ -137,7 +163,9 @@ class EpisodeRecorder:
                         self.policy_renderer.scene.flags[
                             mujoco.mjtRndFlag.mjRND_REFLECTION
                         ] = 0
-                    images[logical] = self.policy_renderer.render().copy()
+                    images[logical] = resize_policy_image(
+                        self.policy_renderer.render()
+                    )
             self.episode.append(Frame(
                 state=np.asarray(self.state_fn(), dtype=np.float32),
                 action=np.asarray(self.action_fn(), dtype=np.float32),
@@ -147,6 +175,8 @@ class EpisodeRecorder:
                 # 0.066, which does not satisfy a nominal 15 Hz timeline).
                 timestamp=float(len(self.episode) / self.fps),
                 frame_index=len(self.episode),
+                phase_index=int(self.phase_fn()) if self.phase_fn is not None else -1,
+                prompt_timestamp=self.prompt_timestamp,
             ))
 
         if self.video_renderer is not None:
@@ -195,7 +225,7 @@ class EpisodeRecorder:
                 for logical in self.cam_name_map
             })
 
-    def finish(self, *, success: bool, save_failed: bool = False) -> None:
+    def finish(self, *, success: bool, save_failed: bool = False) -> Optional[int]:
         if self.video_frames and self.record_path:
             try:
                 import imageio.v2 as imageio
@@ -208,10 +238,10 @@ class EpisodeRecorder:
             print(f"    video -> {path}")
 
         if self.writer is None or self.episode is None:
-            return
+            return None
         if not success and not save_failed:
             print("    episode not saved (SUCCESS=False; pass --save-failed to keep it)")
-            return
+            return None
         if not success:
             # Same convention as collect_dataset.py so failures are filterable.
             self.episode.task = f"[FAIL] {self.episode.task}"
@@ -220,3 +250,4 @@ class EpisodeRecorder:
         self.writer.finalize()
         print(f"    episode {self.episode.episode_index} "
               f"({len(self.episode)} frames) -> {self.writer.root}")
+        return self.episode.episode_index

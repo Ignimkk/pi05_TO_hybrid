@@ -7,7 +7,12 @@
   </default>
 
   <visual>
-      <map force="0.1" zfar="30"/>
+      <!-- The transport office makes model.stat.extent about 22.6 m. MuJoCo's
+           default znear=0.01 therefore clips the closest 22.6 cm, including the
+           wrist gripper and tabletop during a grasp (camera clearance is about
+           14 cm), making the image appear to pass through the table. Keep a
+           2.3 cm near plane instead; this also applies to the block scene. -->
+      <map force="0.1" znear="0.001" zfar="30"/>
       <!-- ACHROMATIC: was "0.15 0.25 0.35 1" (blue, same hue family as the block).
            0.236 grey carries the same Rec.709 luminance. Restore the original to revert. -->
       <rgba haze="0.236 0.236 0.236 1"/>

@@ -30,6 +30,10 @@ src/rby1_manipulation/
 상세한 모듈 책임, 의존 방향, 이전 파일명 매핑은
 [`docs/RBY1_MANIPULATION_PACKAGE_STRUCTURE_KO.md`](../../docs/RBY1_MANIPULATION_PACKAGE_STRUCTURE_KO.md)를 참고합니다.
 
+하나의 prompt와 하나의 과업만 담는 2,000-episode 과일-바구니 데이터셋의
+schedule, phase metadata, 자동 판정과 실행 명령은
+[`docs/ATOMIC_BASKET_DATASET_14D_KO.md`](docs/ATOMIC_BASKET_DATASET_14D_KO.md)를 참고합니다.
+
 ---
 
 ## 1. mink IK 사용 및 선택 이유

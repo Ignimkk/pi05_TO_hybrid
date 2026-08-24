@@ -10,11 +10,13 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "imageio",
+  "imageio-ffmpeg",
   "mink",
   "mujoco",
   "numpy",
   "opencv-python",
   "pyarrow",
+  "scipy>=1.9",
 ]
 
 [project.scripts]
@@ -27,6 +29,10 @@ rby1-transport-pack-lift = "rby1_manipulation.tasks.transport_pack_lift:main"
 rby1-collect-dataset = "rby1_manipulation.data.collect_dataset:main"
 rby1-collect-batch = "rby1_manipulation.data.collect_batch:main"
 rby1-collect-transport-dataset = "rby1_manipulation.data.collect_transport_dataset:main"
+rby1-collect-atomic-transport-dataset = "rby1_manipulation.data.collect_atomic_transport_dataset:main"
+rby1-validate-atomic-dataset = "rby1_manipulation.data.validate_atomic_dataset:main"
+rby1-finalize-atomic-dataset = "rby1_manipulation.data.finalize_atomic_dataset:main"
+rby1-evaluate-atomic-rollouts = "rby1_manipulation.evaluation.atomic_transport:main"
 rby1-follow-mocap = "rby1_manipulation.tools.follow_mocap:main"
 rby1-preview-block-grid = "rby1_manipulation.tools.preview_block_grid:main"
 rby1-preview-fruit-grid = "rby1_manipulation.tools.preview_fruit_grid:main"

@@ -175,6 +175,12 @@ object over
 table 또는 inter-arm 접촉이 한 번이라도 검출된 episode는 성공 데이터로 저장하지
 않는다.
 
+후속 `rby1_transport_14d_v2` 재수집에서는 팔 복귀 명령만 기록하는 것으로 끝내지
+않고 측정 joint가 초기 자세에서 최대 0.02rad 이내로 수렴한 것을 확인한 뒤 다음
+팔 동작을 시작한다. 1초 내 수렴하지 않으면 해당 시도를 실패 처리한다.
+`pack_and_lift`에서는 crate 접근 전에도 양팔에 같은 수렴 검사를 적용한다. 작업
+테이블의 긴 축은 중심을 유지한 채 0.80m에서 1.00m로 20cm 확장했다.
+
 ### 4.4 동작 속도
 
 검증된 기본 `speed_scale`은 `1.25`다. `1.5`에서는 banana가 이동 중 이탈한
@@ -358,6 +364,39 @@ physics 진행 중 state/action/qpos만 기록
 | state/action | 모두 14-D |
 | FPS/영상 | 15 FPS, 224×224, 카메라 3개 |
 | 로컬 크기 | 약 4.5 GB |
+
+### 6.6 개선판 v2 재수집
+
+기존 성공 manifest를 기준으로 episode 사양을 재사용하되, 비중이 과했던
+`lift_only`만 절반으로 축소한다. 기존 데이터는 보존하며 새 출력 경로를 사용한다.
+
+| 계열 | v1 | v2 |
+|---|---:|---:|
+| `pack_only` | 400 | 400 |
+| `lift_only` | 400 | 200 |
+| `pack_and_lift` | 400 | 400 |
+| 합계 | 1,200 | 1,000 |
+
+v2의 `lift_only`는 사전 적재 수 0~4개가 각각 40개이고, 네 과일은 각각 100회
+사전 적재된다. 전체 v2 schedule에서 16개 layout은 각각 62~63회, 각 과일의
+slot 0~3 노출은 각각 250회다. wheel과 장애물은 포함하지 않는다.
+
+```bash
+cd /home/mk/dev_ws/vla/pi0_TO_ws
+
+PYTHONUNBUFFERED=1 \
+  src/rby1_manipulation/.venv/bin/python \
+  -m rby1_manipulation.data.collect_transport_dataset \
+  --output-dir /home/mk/dev_ws/vla/pi0_TO_ws/datasets/rby1_transport_14d_v2 \
+  --reference-manifest /home/mk/dev_ws/vla/pi0_TO_ws/datasets/rby1_transport_14d/transport_episode_manifest.jsonl \
+  --lift-only-episodes 200 \
+  --selection-seed 20260820 \
+  --speed-scale 1.25
+```
+
+MP4 저장에는 `imageio-ffmpeg`가 필요하며 패키지 의존성과 `uv.lock`에 명시되어
+있다. 수집 전 단일 `lift_only` episode에서 Parquet 1개, 카메라 MP4 3개와 세
+metadata 파일이 함께 생성되는 것을 확인한다.
 
 ---
 

@@ -97,15 +97,15 @@
          diffuse="0.42 0.42 0.40" specular="0.05 0.05 0.05" castshadow="false"/>
 
   <!-- ===== Table: geometry identical to scene_blocks.xml. Top surface z = 0.82. =====
-       Deliberately unchanged so the two scenes share the same work surface. -->
+       The 1.00 m long Y axis is centred at y=0, with 0.10 m added on each side. -->
   <body name="table" pos="0.65 0 0">
-    <geom name="table_top" type="box" size="0.25 0.4 0.02" pos="0 0 0.80"
+    <geom name="table_top" type="box" size="0.25 0.50 0.02" pos="0 0 0.80"
           rgba="0.72 0.55 0.36 1" friction="1 0.005 0.001"/>
 
-    <geom name="table_leg_fl" type="box" size="0.02 0.02 0.40" pos=" 0.23  0.38 0.40" rgba="0.4 0.3 0.2 1"/>
-    <geom name="table_leg_fr" type="box" size="0.02 0.02 0.40" pos=" 0.23 -0.38 0.40" rgba="0.4 0.3 0.2 1"/>
-    <geom name="table_leg_bl" type="box" size="0.02 0.02 0.40" pos="-0.23  0.38 0.40" rgba="0.4 0.3 0.2 1"/>
-    <geom name="table_leg_br" type="box" size="0.02 0.02 0.40" pos="-0.23 -0.38 0.40" rgba="0.4 0.3 0.2 1"/>
+    <geom name="table_leg_fl" type="box" size="0.02 0.02 0.40" pos=" 0.23  0.48 0.40" rgba="0.4 0.3 0.2 1"/>
+    <geom name="table_leg_fr" type="box" size="0.02 0.02 0.40" pos=" 0.23 -0.48 0.40" rgba="0.4 0.3 0.2 1"/>
+    <geom name="table_leg_bl" type="box" size="0.02 0.02 0.40" pos="-0.23  0.48 0.40" rgba="0.4 0.3 0.2 1"/>
+    <geom name="table_leg_br" type="box" size="0.02 0.02 0.40" pos="-0.23 -0.48 0.40" rgba="0.4 0.3 0.2 1"/>
   </body>
 
   <!-- ===== Multipurpose transport crate =====

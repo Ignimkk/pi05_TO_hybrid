@@ -173,6 +173,7 @@ def reset_fruit_grid_scene(
     rng: np.random.Generator | None = None,
     randomize: RandomizationSpec | None = None,
     settle_seconds: float = 1.5,
+    position_jitter_xy: float = 0.0,
 ) -> FruitScene:
     """Reset, place four fruits on the grid/in crate, settle, and report poses."""
     order = tuple(slot_order)
@@ -180,6 +181,9 @@ def reset_fruit_grid_scene(
     if len(set(preloaded)) != len(preloaded) or not set(preloaded) <= set(OBJECT_TYPES):
         raise ValueError(f"preloaded_objects must be unique members of {OBJECT_TYPES}")
 
+    if position_jitter_xy < 0.0:
+        raise ValueError("position_jitter_xy must be non-negative")
+    rng = rng if rng is not None else np.random.default_rng()
     spec = randomize if randomize is not None else RandomizationSpec()
     spec.object_types = OBJECT_TYPES
     spec.object_pose = False
@@ -198,6 +202,30 @@ def reset_fruit_grid_scene(
         layout_index=layout_index,
         slot_order=order,
     )
+    if position_jitter_xy:
+        placed: list[np.ndarray] = []
+        for fruit in order:
+            nominal = requested[fruit].copy()
+            candidate = nominal.copy()
+            for _ in range(100):
+                candidate[:2] = nominal[:2] + rng.uniform(
+                    -position_jitter_xy, position_jitter_xy, size=2
+                )
+                x_lo, x_hi = TRANSPORT_SMALL_OBJ_REACH["x"]
+                y_lo, y_hi = TRANSPORT_SMALL_OBJ_REACH["y"]
+                candidate[0] = float(np.clip(candidate[0], x_lo, x_hi))
+                sign = 1.0 if nominal[1] > 0.0 else -1.0
+                candidate[1] = sign * float(np.clip(abs(candidate[1]), y_lo, y_hi))
+                if fruit in preloaded or all(
+                    np.linalg.norm(candidate[:2] - other[:2]) >= MIN_TABLE_SEPARATION
+                    for other in placed
+                ):
+                    break
+            else:
+                raise RuntimeError("could not jitter fruit grid without overlap")
+            requested[fruit] = candidate.copy()
+            if fruit not in preloaded:
+                placed.append(candidate.copy())
     crate_pos = body_position(model, data, "crate")
     crate_rot = body_rotation(model, data, "crate")
     crate_pose = free_body_pose(model, data, "crate_free")

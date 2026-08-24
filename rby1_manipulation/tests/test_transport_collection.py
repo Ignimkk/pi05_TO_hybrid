@@ -7,6 +7,7 @@ import unittest
 from rby1_manipulation.control.bimanual import BiWaypoint
 from rby1_manipulation.data.collect_transport_dataset import (
     build_schedule,
+    reduce_reference_schedule,
     schedule_summary,
 )
 from rby1_manipulation.simulation.fruit_grid import (
@@ -61,6 +62,31 @@ class TransportCollectionTest(unittest.TestCase):
         self.assertTrue(all(
             counts == [300, 300, 300, 300]
             for counts in self.summary["slot_exposure"].values()
+        ))
+
+    def test_reference_recollection_halves_only_lift_family(self) -> None:
+        reduced = reduce_reference_schedule(self.schedule, lift_only_episodes=200)
+        summary = schedule_summary(reduced)
+        self.assertEqual(len(reduced), 1000)
+        self.assertEqual(
+            summary["families"],
+            {"pack_only": 400, "lift_only": 200, "pack_and_lift": 400},
+        )
+        self.assertEqual(
+            summary["counts"]["lift_only"],
+            {"0": 40, "1": 40, "2": 40, "3": 40, "4": 40},
+        )
+        self.assertEqual(
+            summary["fruit_exposure"]["lift_only"],
+            {"apple": 100, "banana": 100, "orange": 100, "pear": 100},
+        )
+        self.assertEqual(
+            sorted(summary["layouts"].values()),
+            [62] * 8 + [63] * 8,
+        )
+        self.assertTrue(all(
+            counts == [250, 250, 250, 250]
+            for counts in summary["slot_exposure"].values()
         ))
 
     def test_fruit_grid_has_16_safe_layouts(self) -> None:

@@ -33,6 +33,8 @@ software rendering benchmark에서 약 2.2배 빠르다.
 
 ## 1,200 episode 균형
 
+아래 표는 최초 데이터셋 `rby1_transport_14d`의 구성이다.
+
 | 지시문 계열 | 수량 | 내부 구성 |
 |---|---:|---|
 | `pack_only` | 400 | 적재 수 1·2·3·4개를 각 100개 |
@@ -49,6 +51,26 @@ software rendering benchmark에서 약 2.2배 빠르다.
 
 과일 실행 순서는 24개 순열을 순환한다. prompt는 선택된 과일 집합을 나타내며,
 동일한 prompt 안에서도 expert의 적재 순서는 균형 있게 달라진다.
+
+## 재수집 v2: lift-only 절반 축소
+
+확장된 테이블과 강화된 팔 교대 복귀 로직으로 다시 수집하는
+`rby1_transport_14d_v2`는 최초 데이터셋의
+`transport_episode_manifest.jsonl`을 episode 사양의 기준으로 사용한다. 기존
+`pack_only`와 `pack_and_lift` 800개는 그대로 유지하고, `lift_only`만 400개에서
+200개로 줄여 총 1,000개를 수집한다.
+
+| 지시문 계열 | 수량 | 구성 |
+|---|---:|---|
+| `pack_only` | 400 | 기존 manifest 사양 전체 유지 |
+| `lift_only` | 200 | 사전 적재 0·1·2·3·4개를 각 40개 |
+| `pack_and_lift` | 400 | 기존 manifest 사양 전체 유지 |
+
+축소된 `lift_only`도 임의 추출에 맡기지 않고 균형 제약으로 선택한다. 각 과일은
+상자 안에 100회씩 등장한다. 전체 1,000개에서 각 과일은 table/crate slot
+0·1·2·3에 각각 250회 등장하고, 16개 grid layout은 각 62~63회 사용한다.
+선택은 `--selection-seed 20260820`으로 재현할 수 있으며 기준 manifest의 SHA-256도
+수집 plan에 저장한다.
 
 ## Fruit grid
 
@@ -118,6 +140,9 @@ retract 후 초기 arm joint 자세로 복귀한다. 예를 들어 `left → rig
 left arm이 crate 위 공유 작업공간에서 빠진 다음 right arm이 시작한다. 같은 팔이
 연속으로 작업하면 중간 복귀를 생략한다. 이 동작은 에피소드 종료 후 reset이 아니라
 한 에피소드 내부의 팔 교대 안전 동작이며 state/action에 함께 기록된다.
+복귀 명령을 보낸 직후 다음 팔을 시작하지 않고, 실제 측정 joint가 초기 자세에서
+최대 0.02rad 이내로 수렴할 때까지 기다린다. 1초 안에 수렴하지 않으면 해당 시도는
+저장하지 않는다. `pack_and_lift`는 상자를 들기 전에도 양팔에 같은 검사를 적용한다.
 또한 좌우 arm subtree 사이 contact를 100Hz로 검사하며, 양팔 접촉이 한 번이라도
 검출된 episode는 성공 데이터로 저장하지 않는다.
 
@@ -138,6 +163,21 @@ python -m rby1_manipulation.data.collect_transport_dataset \
   --output-dir /data/rby1_transport_14d \
   --speed-scale 1.25
 ```
+
+기존 manifest를 기준으로 v2 1,000개를 새 디렉터리에 수집:
+
+```bash
+python -m rby1_manipulation.data.collect_transport_dataset \
+  --output-dir /home/mk/dev_ws/vla/pi0_TO_ws/datasets/rby1_transport_14d_v2 \
+  --reference-manifest /home/mk/dev_ws/vla/pi0_TO_ws/datasets/rby1_transport_14d/transport_episode_manifest.jsonl \
+  --lift-only-episodes 200 \
+  --selection-seed 20260820 \
+  --speed-scale 1.25
+```
+
+v2는 대칭으로 20cm 확장한 0.50×1.00m 테이블을 사용한다. wheel, 선반 운반,
+정적·동적 장애물은 계속 비활성화되어 있다. 기존 `rby1_transport_14d`는 수정하지
+않는다.
 
 기본적으로 실패한 plan은 장면 randomization seed를 바꾸어 최대 5회 시도한다.
 성공한 plan만 LeRobot dataset에 저장된다. 중단 후 같은 명령을 다시 실행하면

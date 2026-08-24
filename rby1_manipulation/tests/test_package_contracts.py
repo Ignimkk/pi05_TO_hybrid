@@ -57,6 +57,28 @@ class PackageContractsTest(unittest.TestCase):
             model = mujoco.MjModel.from_xml_path(str(path))
             self.assertEqual((model.nq, model.nv, model.nu), dimensions, path.name)
 
+    def test_table_long_axis_is_one_meter_and_symmetric(self) -> None:
+        for path in (BLOCK_MODEL_XML, TRANSPORT_MODEL_XML):
+            model = mujoco.MjModel.from_xml_path(str(path))
+            table_top = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_GEOM, "table_top"
+            )
+            np.testing.assert_allclose(
+                model.geom_size[table_top], [0.25, 0.50, 0.02]
+            )
+            leg_y = {
+                name: float(model.geom_pos[mujoco.mj_name2id(
+                    model, mujoco.mjtObj.mjOBJ_GEOM, name
+                ), 1])
+                for name in (
+                    "table_leg_fl", "table_leg_fr", "table_leg_bl", "table_leg_br"
+                )
+            }
+            self.assertAlmostEqual(leg_y["table_leg_fl"], 0.48)
+            self.assertAlmostEqual(leg_y["table_leg_bl"], 0.48)
+            self.assertAlmostEqual(leg_y["table_leg_fr"], -0.48)
+            self.assertAlmostEqual(leg_y["table_leg_br"], -0.48)
+
     def test_14d_transport_contract_matches_mobile_prefix(self) -> None:
         model = mujoco.MjModel.from_xml_path(str(TRANSPORT_MODEL_XML))
         data = mujoco.MjData(model)

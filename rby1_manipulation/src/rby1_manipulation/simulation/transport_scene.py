@@ -75,6 +75,7 @@ SHELF_LEVEL_SITES = ("shelf_level_0_site", "shelf_level_1_site", "shelf_level_2_
 TABLE_BODY = "table"
 TABLE_TOP_Z = 0.82
 TABLE_X_RANGE = (0.40, 0.90)
+TABLE_Y_RANGE = (-0.50, 0.50)
 
 # Crate half-extents (outer) and interior clearance, from scene_transport.xml.
 CRATE_HALF = np.array([0.090, 0.150, 0.060])
