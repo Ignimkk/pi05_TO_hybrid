@@ -498,6 +498,12 @@ def main():
                          "inference step holding qpos, the 14-D state, the three 224x224 policy "
                          "images verbatim, and the returned chunk. Depth and segmentation are NOT "
                          "stored -- qpos regenerates them deterministically via TransportScene")
+    ap.add_argument("--record-depth", nargs="*", default=None,
+                    metavar="CAMERA",
+                    help="with --record-ag3s, also store depth + intrinsics + extrinsics for these "
+                         "MuJoCo cameras as uint16 millimetres (the format a real depth camera "
+                         "delivers). No argument means all three: zed_left wrist_cam_l wrist_cam_r. "
+                         "Adds roughly 1 MB per inference step")
     ap.add_argument("--remote", default=None,
                     help="host:port of a running scripts/serve_policy.py server; if set, "
                          "skips local model load and streams obs/actions over websocket instead")
@@ -616,6 +622,8 @@ def main():
         ap.error("--trajectory-out currently requires --model rby1")
     if args.record_ag3s and mcfg["obs_format"] != "rby1":
         ap.error("--record-ag3s requires --model rby1 (AG3S is wired to the RB-Y1 cameras)")
+    if args.record_depth is not None and not args.record_ag3s:
+        ap.error("--record-depth only does something together with --record-ag3s")
     print(f"=== Model: {args.model} ===")
     if args.remote:
         print(f"  remote     : {args.remote}  (server must serve obs_format={mcfg['obs_format']!r})")
@@ -805,8 +813,14 @@ def main():
         if str(workspace_root) not in sys.path:
             sys.path.insert(0, str(workspace_root))
         from benchmark.ag3s.experiments.policy_record import PolicyRecordWriter
+        depth_cameras = ()
+        if args.record_depth is not None:
+            depth_cameras = tuple(args.record_depth) or (
+                "zed_left", "wrist_cam_l", "wrist_cam_r"
+            )
         ag3s_recorder = PolicyRecordWriter(
             args.record_ag3s,
+            depth_cameras=depth_cameras,
             model=m,
             model_xml=mcfg.get("model_xml", MODEL_XML),
             prompt=args.prompt,
@@ -911,7 +925,8 @@ def main():
 
                 if ag3s_recorder is not None:
                     ag3s_recorder.record(
-                        t_step=t_step, obs=obs, data=d, chunk=chunk, infer_ms=infer_elapsed_ms
+                        t_step=t_step, obs=obs, data=d, chunk=chunk,
+                        infer_ms=infer_elapsed_ms, model=m,
                     )
 
                 if args.trajectory_out:
