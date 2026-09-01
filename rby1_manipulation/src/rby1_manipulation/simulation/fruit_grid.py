@@ -161,6 +161,40 @@ def table_placements(
     }
 
 
+def offset_table_placements_from_basket(
+    placements: Mapping[str, np.ndarray],
+    basket_xy: Sequence[float],
+    *,
+    offset_m: float,
+    excluded_objects: Sequence[str] = (),
+) -> dict[str, np.ndarray]:
+    """Move table objects radially away from the basket by ``offset_m``.
+
+    A new mapping and copied position arrays are returned so the configured training
+    grid is never mutated. Objects already preloaded in the basket can be excluded.
+    """
+    if not np.isfinite(offset_m) or offset_m < 0.0:
+        raise ValueError("offset_m must be a finite non-negative distance")
+    center = np.asarray(basket_xy, dtype=float)
+    if center.shape != (2,) or not np.isfinite(center).all():
+        raise ValueError("basket_xy must be a finite [x, y] coordinate")
+
+    excluded = set(excluded_objects)
+    shifted: dict[str, np.ndarray] = {}
+    for name, value in placements.items():
+        position = np.asarray(value, dtype=float).copy()
+        if position.shape != (3,) or not np.isfinite(position).all():
+            raise ValueError(f"placement {name!r} must be a finite [x, y, z] coordinate")
+        if offset_m and name not in excluded:
+            direction = position[:2] - center
+            distance = float(np.linalg.norm(direction))
+            if distance <= np.finfo(float).eps:
+                raise ValueError(f"cannot offset {name!r}: it is at the basket center")
+            position[:2] += direction * (offset_m / distance)
+        shifted[name] = position
+    return shifted
+
+
 def reset_fruit_grid_scene(
     model: mujoco.MjModel,
     data: mujoco.MjData,
@@ -174,6 +208,7 @@ def reset_fruit_grid_scene(
     randomize: RandomizationSpec | None = None,
     settle_seconds: float = 1.5,
     position_jitter_xy: float = 0.0,
+    basket_clearance_offset: float = 0.0,
 ) -> FruitScene:
     """Reset, place four fruits on the grid/in crate, settle, and report poses."""
     order = tuple(slot_order)
@@ -183,6 +218,8 @@ def reset_fruit_grid_scene(
 
     if position_jitter_xy < 0.0:
         raise ValueError("position_jitter_xy must be non-negative")
+    if not np.isfinite(basket_clearance_offset) or basket_clearance_offset < 0.0:
+        raise ValueError("basket_clearance_offset must be a finite non-negative distance")
     rng = rng if rng is not None else np.random.default_rng()
     spec = randomize if randomize is not None else RandomizationSpec()
     spec.object_types = OBJECT_TYPES
@@ -230,6 +267,13 @@ def reset_fruit_grid_scene(
     crate_rot = body_rotation(model, data, "crate")
     crate_pose = free_body_pose(model, data, "crate_free")
     nominal_crate_z = float(layout_config["crate"]["spawn_z"])
+
+    requested = offset_table_placements_from_basket(
+        requested,
+        crate_pos[:2],
+        offset_m=basket_clearance_offset,
+        excluded_objects=preloaded,
+    )
 
     for preload_index, fruit in enumerate(preloaded):
         local_xy = np.asarray(grid_config["crate_slots"][preload_index], dtype=float)

@@ -14,28 +14,37 @@ train_log="$project/logs/rby1_atomic_lora_30k_20260825.log"
 experiment=rby1_atomic_basket_14d_v2_30k_20260825
 norm_file="$assets_base/pi05_rby1_atomic_lora/local/rby1_atomic_basket_14d_v2/norm_stats.json"
 checkpoint_dir="$project/checkpoints/pi05_rby1_atomic_lora/$experiment"
+repo_path="$lerobot_home/local/rby1_atomic_basket_14d_v2"
 
 exec >>"$guard_log" 2>&1
+if [[ ! -e "$repo_path" ]]; then
+  echo "$(date -Is) ERROR: missing LeRobot repo path: $repo_path"
+  exit 1
+fi
+if [[ "$(readlink -f "$repo_path")" != "$(readlink -f "$dataset")" ]]; then
+  echo "$(date -Is) ERROR: LeRobot repo does not resolve to dataset"
+  echo "  repo: $(readlink -f "$repo_path")"
+  echo "  data: $(readlink -f "$dataset")"
+  exit 1
+fi
 echo "$(date -Is) waiting for $norm_session"
 while tmux has-session -t "$norm_session" 2>/dev/null; do
   sleep 30
 done
 
-if ! grep -q 'Generating train split: 497754 examples' "$norm_log"; then
-  echo "$(date -Is) ERROR: expected 497754-example train split was not observed"
-  exit 1
-fi
 if ! grep -q 'Writing stats to:' "$norm_log"; then
   echo "$(date -Is) ERROR: norm computation did not report successful output"
   exit 1
 fi
+"$project/openpi/.venv/bin/python" -c \
+  'from openpi.training.config import get_config; e=get_config("pi05_rby1_atomic_lora").data.base_config.episodes; assert tuple(e)==tuple(range(1591)); print("OpenPI train episode selection: 0:1591 OK")'
 if [[ ! -s "$norm_file" ]]; then
   echo "$(date -Is) ERROR: missing or empty $norm_file"
   exit 1
 fi
 "$project/openpi/.venv/bin/python" -m json.tool "$norm_file" >/dev/null
 "$project/openpi/.venv/bin/python" "$project/scripts/preflight_atomic_finetune.py" \
-  --dataset "$dataset" --require-stats
+  --dataset "$dataset" --require-stats --check-video-frames
 if [[ -e "$checkpoint_dir" ]]; then
   echo "$(date -Is) ERROR: checkpoint destination already exists: $checkpoint_dir"
   exit 1

@@ -26,6 +26,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--require-stats", action="store_true")
+    parser.add_argument(
+        "--check-video-frames",
+        action="store_true",
+        help="Open every MP4 and compare its frame count with the episode parquet.",
+    )
     args = parser.parse_args()
 
     root = Path(args.dataset).resolve()
@@ -97,12 +102,42 @@ def main() -> int:
     if train_rows != 497754:
         errors.append(f"train rows={train_rows}, expected 497754")
 
+    episode_lengths = {
+        int(entry["episode_index"]): int(entry["length"])
+        for entry in episodes
+    }
+    checked_videos = 0
     for camera in CAMERAS:
-        videos = list(
+        videos = sorted(
             (root / "videos").glob(f"chunk-*/observation.images.{camera}/episode_*.mp4")
         )
         if len(videos) != total:
             errors.append(f"{camera} videos={len(videos)}, expected {total}")
+        if args.check_video_frames:
+            import imageio.v2 as imageio
+
+            for video in videos:
+                try:
+                    episode_index = int(video.stem.split("_")[1])
+                    reader = imageio.get_reader(video)
+                    try:
+                        frames = reader.count_frames()
+                    finally:
+                        reader.close()
+                    expected = episode_lengths[episode_index]
+                    if frames != expected:
+                        errors.append(
+                            f"video frames mismatch: {video.relative_to(root)} "
+                            f"has {frames}, expected {expected}"
+                        )
+                except Exception as exc:  # ffmpeg/imageio errors must fail preflight
+                    errors.append(f"cannot decode {video.relative_to(root)}: {exc}")
+                checked_videos += 1
+                if checked_videos % 500 == 0:
+                    print(
+                        f"  video frames {checked_videos}/{total * len(CAMERAS)}",
+                        flush=True,
+                    )
     if args.require_stats:
         stats = root / "meta" / "stats.json"
         if not stats.is_file() or stats.stat().st_size == 0:
@@ -120,6 +155,8 @@ def main() -> int:
     print(f"  train episodes/frames: 1591/{train_rows}")
     print("  timestamp grid       : exact nominal 15 fps")
     print("  parquet backups      : 0")
+    if args.check_video_frames:
+        print(f"  decoded video files  : {checked_videos}")
     return 0
 
 

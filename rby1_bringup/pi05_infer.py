@@ -31,14 +31,22 @@ MANIPULATION_SRC = REPO_ROOT / "rby1_manipulation" / "src"
 if str(MANIPULATION_SRC) not in sys.path:
     sys.path.insert(0, str(MANIPULATION_SRC))
 
-from rby1_manipulation.simulation.pick_place_obstacles import (
-    PickPlaceObstacleManager,
-    load_pick_place_obstacle_config,
+from rby1_manipulation.control.ik import left_arm_handles, right_arm_handles
+from rby1_manipulation.control.motion import open_grippers
+from rby1_manipulation.data.recording import (
+    POLICY_RENDER_REFLECTIONS,
+    POLICY_SOURCE_HEIGHT,
+    POLICY_SOURCE_WIDTH,
+    resize_policy_image,
 )
 from rby1_manipulation.simulation.fruit_grid import (
     OBJECT_TYPES as FRUIT_TYPES,
     load_fruit_grid_config,
     reset_fruit_grid_scene,
+)
+from rby1_manipulation.simulation.pick_place_obstacles import (
+    PickPlaceObstacleManager,
+    load_pick_place_obstacle_config,
 )
 from rby1_manipulation.simulation.transport_scene import load_layout_config
 
@@ -119,9 +127,13 @@ def configure_view_camera(camera, view):
     camera.elevation = -18.0
 
 
-def render_cam(model, data, renderer, cam_name, size=224):
+def render_cam(model, data, renderer, cam_name, size=224, *, match_rby1_dataset=False):
     renderer.update_scene(data, camera=cam_name)
+    if match_rby1_dataset and not POLICY_RENDER_REFLECTIONS:
+        renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = 0
     img = renderer.render()
+    if match_rby1_dataset:
+        return resize_policy_image(img)
     im = Image.fromarray(img).resize((size, size), Image.BILINEAR)
     return np.asarray(im)
 
@@ -248,9 +260,15 @@ def build_obs(obs_format, m, d, renderer, idx, prompt):
     if obs_format == "rby1":
         # Same 3-camera / 14-dim dual-arm layout as "aloha", but with the exact
         # gripper-open value the training dataset was collected with.
-        base_img    = render_cam(m, d, renderer, "zed_left")      # cam_high
-        wrist_l_img = render_cam(m, d, renderer, "wrist_cam_l")   # cam_left_wrist
-        wrist_r_img = render_cam(m, d, renderer, "wrist_cam_r")   # cam_right_wrist
+        base_img = render_cam(
+            m, d, renderer, "zed_left", match_rby1_dataset=True
+        )
+        wrist_l_img = render_cam(
+            m, d, renderer, "wrist_cam_l", match_rby1_dataset=True
+        )
+        wrist_r_img = render_cam(
+            m, d, renderer, "wrist_cam_r", match_rby1_dataset=True
+        )
 
         left_joint_pos  = np.array([d.qpos[i] for i in idx["left_q"]], dtype=np.float64)
         right_joint_pos = np.array([d.qpos[i] for i in idx["right_q"]], dtype=np.float64)
@@ -329,11 +347,77 @@ def apply_action(action_format, action, d, idx, act):
         for i in range(6):
             d.ctrl[act["left_a"][i]]  = left_targets[i]
             d.ctrl[act["right_a"][i]] = right_targets[i]
+        # arm_6 is intentionally absent from the 14-D policy. Reassert the
+        # teleop-keyframe target on every policy step instead of relying on a
+        # stale actuator ctrl value to hold it implicitly.
+        d.ctrl[act["left_a"][6]] = act["left_arm6_hold"]
+        d.ctrl[act["right_a"][6]] = act["right_arm6_hold"]
         d.ctrl[act["left_grip_a"]]  = left_grip * RBY1_GRIPPER_OPEN
         d.ctrl[act["right_grip_a"]] = right_grip * RBY1_GRIPPER_OPEN
         return
 
     raise ValueError(f"unknown action_format: {action_format}")
+
+
+def validate_rby1_observation(obs, *, log=False):
+    """Validate the raw 14-D/three-camera interface sent to the policy."""
+    state = np.asarray(obs.get("state"))
+    if state.shape != (14,) or not np.isfinite(state).all():
+        raise ValueError(
+            f"RBY1 observation state must be finite shape (14,), got {state.shape}"
+        )
+    images = obs.get("images", {})
+    if set(images) != set(POLICY_CAMERA_NAMES):
+        raise ValueError(
+            f"RBY1 observation cameras must be {POLICY_CAMERA_NAMES}, got {tuple(images)}"
+        )
+    camera_summary = {}
+    for name in POLICY_CAMERA_NAMES:
+        image = np.asarray(images[name])
+        if image.shape != (3, 224, 224) or image.dtype != np.uint8:
+            raise ValueError(
+                f"RBY1 camera {name!r} must be uint8 CHW (3, 224, 224), "
+                f"got dtype={image.dtype} shape={image.shape}"
+            )
+        camera_summary[name] = f"{image.dtype}{tuple(image.shape)}"
+    if log:
+        print(
+            "[first observation] "
+            f"state_shape={state.shape} range=[{state.min():+.4f}, {state.max():+.4f}]"
+        )
+        print(
+            "[first observation] state="
+            + np.array2string(state, precision=4, separator=", ", suppress_small=True)
+        )
+        print(f"[first observation] cameras={camera_summary}")
+
+
+def validate_rby1_action_chunk(chunk, *, log=False):
+    """Validate absolute 14-D actions returned after server output transforms."""
+    actions = np.asarray(chunk)
+    if (
+        actions.ndim != 2
+        or actions.shape[0] == 0
+        or actions.shape[1] != 14
+        or not np.isfinite(actions).all()
+    ):
+        raise ValueError(
+            "RBY1 policy actions must be a non-empty finite [horizon, 14] array, "
+            f"got {actions.shape}"
+        )
+    if log:
+        joint_actions = actions[:, [*range(6), *range(7, 13)]]
+        gripper_actions = actions[:, [6, 13]]
+        print(
+            "[first action chunk] "
+            f"shape={actions.shape} raw_range=[{actions.min():+.4f}, {actions.max():+.4f}] "
+            f"joint_range=[{joint_actions.min():+.4f}, {joint_actions.max():+.4f}] "
+            f"gripper_range=[{gripper_actions.min():+.4f}, {gripper_actions.max():+.4f}]"
+        )
+        print(
+            "[first action chunk] action[0]="
+            + np.array2string(actions[0], precision=4, separator=", ", suppress_small=True)
+        )
 
 
 def load_local_policy(mcfg):
@@ -409,6 +493,11 @@ def main():
     )
     ap.add_argument("--record-inputs", default=None, metavar="DIR",
                     help="directory for cam_high/cam_left_wrist/cam_right_wrist policy-input MP4s")
+    ap.add_argument("--record-ag3s", default=None, metavar="DIR",
+                    help="directory for AG3S policy-observation records: one compressed .npz per "
+                         "inference step holding qpos, the 14-D state, the three 224x224 policy "
+                         "images verbatim, and the returned chunk. Depth and segmentation are NOT "
+                         "stored -- qpos regenerates them deterministically via TransportScene")
     ap.add_argument("--remote", default=None,
                     help="host:port of a running scripts/serve_policy.py server; if set, "
                          "skips local model load and streams obs/actions over websocket instead")
@@ -460,6 +549,13 @@ def main():
         default=None,
         help="fruits initially placed inside the crate; requires --fruit-layout-index",
     )
+    ap.add_argument(
+        "--fruit-basket-offset",
+        type=float,
+        default=0.0,
+        help="move non-preloaded fruits this many metres radially away from the basket "
+             "during a fruit-grid reset (inference-only; requires --fruit-layout-index)",
+    )
     args = ap.parse_args()
 
     if args.start_delay < 0:
@@ -468,12 +564,19 @@ def main():
         ap.error("--speed must be non-negative (0 = unlimited)")
     if args.obstacle_stop_distance < 0:
         ap.error("--obstacle-stop-distance must be non-negative")
+    if not np.isfinite(args.fruit_basket_offset) or args.fruit_basket_offset < 0:
+        ap.error("--fruit-basket-offset must be a finite non-negative distance")
     if args.fruit_layout_index is not None and args.model != "rby1_transport_14d":
         ap.error("--fruit-layout-index requires --model rby1_transport_14d")
     if args.fruit_layout_index is None and (
-        args.fruit_slot_order is not None or args.fruit_preloaded is not None
+        args.fruit_slot_order is not None
+        or args.fruit_preloaded is not None
+        or args.fruit_basket_offset != 0.0
     ):
-        ap.error("--fruit-slot-order/--fruit-preloaded require --fruit-layout-index")
+        ap.error(
+            "--fruit-slot-order/--fruit-preloaded/--fruit-basket-offset require "
+            "--fruit-layout-index"
+        )
     if args.fruit_slot_order is not None and len(set(args.fruit_slot_order)) != 4:
         ap.error("--fruit-slot-order must contain each fruit exactly once")
     if args.fruit_preloaded is not None and len(set(args.fruit_preloaded)) != len(
@@ -511,6 +614,8 @@ def main():
         ap.error("--record-inputs requires --model aloha or --model rby1")
     if args.trajectory_out and mcfg["obs_format"] != "rby1":
         ap.error("--trajectory-out currently requires --model rby1")
+    if args.record_ag3s and mcfg["obs_format"] != "rby1":
+        ap.error("--record-ag3s requires --model rby1 (AG3S is wired to the RB-Y1 cameras)")
     print(f"=== Model: {args.model} ===")
     if args.remote:
         print(f"  remote     : {args.remote}  (server must serve obs_format={mcfg['obs_format']!r})")
@@ -530,6 +635,13 @@ def main():
     d = mujoco.MjData(m)
     key = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "teleop")
     mujoco.mj_resetDataKeyframe(m, d, key)
+    teleop_arm6_targets = {}
+    for side, joint_name in (
+        ("left", LEFT_ARM_JOINTS[6]),
+        ("right", RIGHT_ARM_JOINTS[6]),
+    ):
+        joint_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+        teleop_arm6_targets[side] = float(d.qpos[m.jnt_qposadr[joint_id]])
     fruit_scene = None
     if args.fruit_layout_index is not None:
         try:
@@ -542,20 +654,71 @@ def main():
                 slot_order=args.fruit_slot_order or FRUIT_TYPES,
                 preloaded_objects=args.fruit_preloaded or (),
                 settle_seconds=1.5,
+                basket_clearance_offset=args.fruit_basket_offset,
             )
         except ValueError as exc:
             ap.error(str(exc))
         print(
             f"  fruit reset: layout={fruit_scene.layout_index} "
-            f"slots={fruit_scene.slot_order} preloaded={fruit_scene.preloaded_objects}"
+            f"slots={fruit_scene.slot_order} preloaded={fruit_scene.preloaded_objects} "
+            f"basket_offset={args.fruit_basket_offset:.3f}m"
         )
+        if args.fruit_basket_offset:
+            print(
+                "  WARNING: shifted fruit positions are outside the training grid; "
+                f"{args.fruit_basket_offset:.3f} m may also exceed the empirically "
+                "validated arm-reach envelope"
+            )
+
+    # Hold every non-gripper actuator at the reset pose before advancing physics.
+    # reset_fruit_grid_scene() already does this for fruit-grid runs, but the same
+    # initialization is also required by the other RBY1 scenes.
+    for i in range(m.nu):
+        d.ctrl[i] = d.qpos[m.jnt_qposadr[m.actuator_trnid[i, 0]]]
+    for side, actuator_name in (
+        ("left", LEFT_ARM_ACTS[6]),
+        ("right", RIGHT_ARM_ACTS[6]),
+    ):
+        actuator_id = mujoco.mj_name2id(
+            m, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name
+        )
+        d.ctrl[actuator_id] = teleop_arm6_targets[side]
+    if args.model == "rby1_transport_14d":
+        print(
+            "  arm_6 hold : teleop keyframe "
+            f"L/R={teleop_arm6_targets['left']:+.3f}/"
+            f"{teleop_arm6_targets['right']:+.3f}"
+        )
+
+    # Match atomic-dataset startup exactly: its recorder starts only after both
+    # grippers have been commanded to fraction=1.0 (ctrl=-0.045) and settled for
+    # 0.5 s. Starting from the teleop keyframe's closed qpos=0.0 would put the
+    # first policy state outside the training distribution.
+    if mcfg["obs_format"] == "rby1":
+        reset_right_arm = right_arm_handles(m)
+        reset_left_arm = left_arm_handles(m)
+        open_grippers(
+            m,
+            d,
+            [reset_right_arm, reset_left_arm],
+            secs=0.5,
+            opening=1.0,
+        )
+        left_open_fraction = float(
+            abs(d.qpos[reset_left_arm.gripper_qidx]) / abs(RBY1_GRIPPER_OPEN)
+        )
+        right_open_fraction = float(
+            abs(d.qpos[reset_right_arm.gripper_qidx]) / abs(RBY1_GRIPPER_OPEN)
+        )
+        print(
+            f"  gripper init: ctrl={RBY1_GRIPPER_OPEN:.3f} "
+            f"state(L/R)={left_open_fraction:.3f}/{right_open_fraction:.3f}"
+        )
+
     # Without this, body/geom world transforms (xpos/xquat) are stale until the first
     # mj_step -- the very first observation (which drives the first action chunk) would
     # be rendered from a blank/garbage scene.
     mujoco.mj_forward(m, d)
-
-    for i in range(m.nu):
-        d.ctrl[i] = d.qpos[m.jnt_qposadr[m.actuator_trnid[i, 0]]]
 
     obstacle_manager = None
     if args.obstacle_profile != "clear":
@@ -593,13 +756,21 @@ def main():
         "left_a":        [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, a) for a in LEFT_ARM_ACTS],
         "right_grip_a":  mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, GRIPPER_R_ACT),
         "left_grip_a":   mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, GRIPPER_L_ACT),
+        "left_arm6_hold": teleop_arm6_targets["left"],
+        "right_arm6_hold": teleop_arm6_targets["right"],
     }
 
-    # Policy-input renderer MUST match the training-data collection resolution exactly
-    # (rby1_manipulation/scenario*.py, collect_batch.py render at native 224x224).
-    # Rendering at a different aspect ratio (e.g. 640x480) and resizing down distorts
-    # the field of view relative to what the model was trained on.
-    renderer_pol = mujoco.Renderer(m, height=224, width=224)
+    # RBY1 policy inputs must match EpisodeRecorder: render the physical camera at
+    # 299x224 (4:3), disable reflections, then resize to the 224x224 policy tensor.
+    # Direct 224x224 rendering changes the horizontal FOV and crops nearby objects.
+    if mcfg["obs_format"] == "rby1":
+        renderer_pol = mujoco.Renderer(
+            m,
+            height=POLICY_SOURCE_HEIGHT,
+            width=POLICY_SOURCE_WIDTH,
+        )
+    else:
+        renderer_pol = mujoco.Renderer(m, height=224, width=224)
     renderer_rec = mujoco.Renderer(m, height=480, width=640)  # third-person --record only
     recording_camera = -1
     if args.view != "free":
@@ -626,6 +797,30 @@ def main():
 
     video_frames = []
     input_frame_buffers = {name: [] for name in POLICY_CAMERA_NAMES}
+
+    ag3s_recorder = None
+    if args.record_ag3s:
+        # The benchmark packages live one level above src/, which is REPO_ROOT here.
+        workspace_root = REPO_ROOT.parent
+        if str(workspace_root) not in sys.path:
+            sys.path.insert(0, str(workspace_root))
+        from benchmark.ag3s.experiments.policy_record import PolicyRecordWriter
+        ag3s_recorder = PolicyRecordWriter(
+            args.record_ag3s,
+            model=m,
+            model_xml=mcfg.get("model_xml", MODEL_XML),
+            prompt=args.prompt,
+            extra={
+                "policy_model": args.model,
+                "remote": args.remote,
+                "ctrl_hz": CTRL_HZ,
+                "open_loop_horizon": OPEN_LOOP_HORIZON,
+                "obstacle_profile": args.obstacle_profile,
+                "fruit_layout_index": args.fruit_layout_index,
+                "fruit_slot_order": args.fruit_slot_order,
+                "argv": sys.argv,
+            },
+        )
     executed_actions = []
     measured_states = []
     predicted_chunks = []
@@ -689,6 +884,8 @@ def main():
         for t_step in range(0, args.max_steps if args.max_steps > 0 else 10**9):
             if chunk is None or chunk_step >= OPEN_LOOP_HORIZON:
                 obs = build_obs(mcfg["obs_format"], m, d, renderer_pol, idx, args.prompt)
+                if mcfg["obs_format"] == "rby1":
+                    validate_rby1_observation(obs, log=(t_step == 0))
                 if args.record_inputs:
                     capture_policy_input_frames(obs, input_frame_buffers)
                 t_infer = time.time()
@@ -707,8 +904,15 @@ def main():
                     result = policy.infer(obs)
                     chunk = np.asarray(result["actions"])
                     seam_timing = result.get("seam_timing", {})
+                if mcfg["action_format"] == "rby1":
+                    validate_rby1_action_chunk(chunk, log=(t_step == 0))
                 infer_elapsed_ms = (time.time() - t_infer) * 1000.0
                 chunk_step = 0
+
+                if ag3s_recorder is not None:
+                    ag3s_recorder.record(
+                        t_step=t_step, obs=obs, data=d, chunk=chunk, infer_ms=infer_elapsed_ms
+                    )
 
                 if args.trajectory_out:
                     predicted_chunks.append(chunk.copy())
@@ -805,6 +1009,8 @@ def main():
                 print("(imageio not installed, saved as PNG sequence)")
         if args.record_inputs:
             save_policy_input_videos(args.record_inputs, input_frame_buffers)
+        if ag3s_recorder is not None:
+            ag3s_recorder.close()
         if args.trajectory_out and executed_actions:
             trajectory_path = pathlib.Path(args.trajectory_out)
             trajectory_path.parent.mkdir(parents=True, exist_ok=True)
@@ -835,6 +1041,10 @@ def main():
                 ),
                 fruit_preloaded=np.asarray(
                     fruit_scene.preloaded_objects if fruit_scene is not None else (),
+                ),
+                fruit_basket_offset_m=np.asarray(
+                    args.fruit_basket_offset,
+                    dtype=np.float64,
                 ),
                 control_hz=np.asarray(CTRL_HZ, dtype=np.int64),
                 execution_length=np.asarray(OPEN_LOOP_HORIZON, dtype=np.int64),

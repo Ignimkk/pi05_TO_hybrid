@@ -1,11 +1,11 @@
-"""Experimental pi0.5 inference runner with deterministic RBY1 grid evaluation.
+"""Experimental pi0.5 inference runner with reproducible RBY1 evaluation suites.
 
 The production-style single-run entry point remains ``pi05_infer.py``.  This
-copy adds the deterministic grid loop and consumes coordinates saved by
-``rby1_manipulation.tools.preview_block_grid``.
+copy adds block-grid and atomic fruit experiments with tabular/visual reports.
 """
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -40,7 +40,36 @@ MANIPULATION_SRC = REPO_ROOT / "rby1_manipulation" / "src"
 if str(MANIPULATION_SRC) not in sys.path:
     sys.path.insert(0, str(MANIPULATION_SRC))
 
-from rby1_manipulation.simulation.transport_scene import BASE_ACTS, BASE_JOINTS
+from rby1_manipulation.control.ik import left_arm_handles, right_arm_handles
+from rby1_manipulation.control.motion import open_grippers
+from rby1_manipulation.data.recording import (
+    POLICY_RENDER_REFLECTIONS,
+    POLICY_SOURCE_HEIGHT,
+    POLICY_SOURCE_WIDTH,
+    resize_policy_image,
+)
+from rby1_manipulation.evaluation.transport import check_grasp, objects_in_crate
+from rby1_manipulation.simulation.fruit_grid import (
+    fruit_grid_fingerprint,
+    layout_count,
+    load_fruit_grid_config,
+    reset_fruit_grid_scene,
+)
+from rby1_manipulation.simulation.transport_scene import (
+    BASE_ACTS,
+    BASE_JOINTS,
+    CRATE_BODY,
+    CRATE_HALF,
+    CRATE_JOINT,
+    OBJECT_BODIES,
+    OBJECT_JOINTS,
+    OBJECT_TYPES,
+    RandomizationSpec,
+    body_position as transport_body_position,
+    free_body_pose,
+    load_layout_config,
+    site_position,
+)
 from rby1_manipulation.simulation.pick_place_obstacles import (
     PickPlaceObstacleManager,
     load_pick_place_obstacle_config,
@@ -128,6 +157,14 @@ RBY1_GRIPPER_OPEN = -0.045
 CTRL_HZ = 15
 OPEN_LOOP_HORIZON = 8
 POLICY_CAMERA_NAMES = ("cam_high", "cam_left_wrist", "cam_right_wrist")
+ATOMIC_DATASET_DEFAULT = REPO_ROOT.parent / "datasets" / "rby1_atomic_basket_14d_v2"
+ATOMIC_TERMINAL_HOLD_STEPS = CTRL_HZ
+ATOMIC_TARGET_SPEED_MPS = 0.03
+ATOMIC_NON_TARGET_DISPLACEMENT_M = 0.02
+ATOMIC_RETREAT_CLEARANCE_M = 0.10
+ATOMIC_RETREAT_ABOVE_RIM_M = 0.10
+ATOMIC_READY_ERROR_RAD = 0.02
+ATOMIC_LIFT_HEIGHT_M = 0.15
 
 # 14-D RBY1 layout is [L 6 joints, L grip, R 6 joints, R grip]; motion metrics are
 # reported on the 12 arm joints only (grippers are near-binary and would dominate jerk).
@@ -202,9 +239,13 @@ def configure_view_camera(camera, view):
     camera.elevation = -18.0
 
 
-def render_cam(model, data, renderer, cam_name, size=224):
+def render_cam(model, data, renderer, cam_name, size=224, *, match_rby1_dataset=False):
     renderer.update_scene(data, camera=cam_name)
+    if match_rby1_dataset and not POLICY_RENDER_REFLECTIONS:
+        renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = 0
     img = renderer.render()
+    if match_rby1_dataset:
+        return resize_policy_image(img)
     im = Image.fromarray(img).resize((size, size), Image.BILINEAR)
     return np.asarray(im)
 
@@ -340,9 +381,13 @@ def build_obs(obs_format, m, d, renderer, idx, prompt):
     if obs_format == "rby1":
         # Same 3-camera / 14-dim dual-arm layout as "aloha", but with the exact
         # gripper-open value the training dataset was collected with.
-        base_img    = render_cam(m, d, renderer, "zed_left")      # cam_high
-        wrist_l_img = render_cam(m, d, renderer, "wrist_cam_l")   # cam_left_wrist
-        wrist_r_img = render_cam(m, d, renderer, "wrist_cam_r")   # cam_right_wrist
+        base_img = render_cam(m, d, renderer, "zed_left", match_rby1_dataset=True)
+        wrist_l_img = render_cam(
+            m, d, renderer, "wrist_cam_l", match_rby1_dataset=True
+        )
+        wrist_r_img = render_cam(
+            m, d, renderer, "wrist_cam_r", match_rby1_dataset=True
+        )
 
         left_joint_pos  = np.array([d.qpos[i] for i in idx["left_q"]], dtype=np.float64)
         right_joint_pos = np.array([d.qpos[i] for i in idx["right_q"]], dtype=np.float64)
@@ -430,6 +475,8 @@ def apply_action(action_format, action, d, idx, act):
         for i in range(6):
             d.ctrl[act["left_a"][i]]  = left_targets[i]
             d.ctrl[act["right_a"][i]] = right_targets[i]
+        d.ctrl[act["left_a"][6]] = act["left_arm6_hold"]
+        d.ctrl[act["right_a"][6]] = act["right_arm6_hold"]
         d.ctrl[act["left_grip_a"]]  = left_grip * RBY1_GRIPPER_OPEN
         d.ctrl[act["right_grip_a"]] = right_grip * RBY1_GRIPPER_OPEN
         return
@@ -444,6 +491,49 @@ def apply_action(action_format, action, d, idx, act):
         return
 
     raise ValueError(f"unknown action_format: {action_format}")
+
+
+def validate_rby1_observation(obs, *, log=False):
+    state = np.asarray(obs.get("state"))
+    if state.shape not in ((14,), (17,)) or not np.isfinite(state).all():
+        raise ValueError(f"RBY1 state must be finite 14-D/17-D, got {state.shape}")
+    images = obs.get("images", {})
+    if set(images) != set(POLICY_CAMERA_NAMES):
+        raise ValueError(f"unexpected RBY1 cameras: {tuple(images)}")
+    for name in POLICY_CAMERA_NAMES:
+        image = np.asarray(images[name])
+        if image.shape != (3, 224, 224) or image.dtype != np.uint8:
+            raise ValueError(
+                f"camera {name} must be uint8 CHW (3,224,224), got {image.dtype} {image.shape}"
+            )
+    if log:
+        print(
+            f"[first observation] shape={state.shape} "
+            f"range=[{state.min():+.4f}, {state.max():+.4f}] "
+            f"state={np.array2string(state, precision=4, separator=', ')}"
+        )
+
+
+def validate_rby1_action_chunk(chunk, expected_dim, *, log=False):
+    actions = np.asarray(chunk)
+    if (
+        actions.ndim != 2
+        or actions.shape[0] == 0
+        or actions.shape[1] != expected_dim
+        or not np.isfinite(actions).all()
+    ):
+        raise ValueError(
+            f"RBY1 actions must be finite [horizon,{expected_dim}], got {actions.shape}"
+        )
+    if log:
+        gripper_actions = actions[:, [6, 13]]
+        joint_actions = actions[:, [*range(6), *range(7, 13)]]
+        print(
+            f"[first action chunk] shape={actions.shape} "
+            f"raw=[{actions.min():+.4f}, {actions.max():+.4f}] "
+            f"joints=[{joint_actions.min():+.4f}, {joint_actions.max():+.4f}] "
+            f"grippers=[{gripper_actions.min():+.4f}, {gripper_actions.max():+.4f}]"
+        )
 
 
 def load_local_policy(mcfg):
@@ -576,6 +666,281 @@ def save_trajectory(
     print(f"saving trajectory ({len(executed_actions)} executed steps) -> {path}")
 
 
+def load_atomic_episode_records(dataset_root):
+    path = pathlib.Path(dataset_root) / "meta" / "atomic_episodes.jsonl"
+    if not path.is_file():
+        raise ValueError(f"atomic episode metadata not found: {path}")
+    records = []
+    with path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid JSON in {path}:{line_number}: {exc}") from exc
+            if int(record.get("state_dim", -1)) != 14 or int(record.get("action_dim", -1)) != 14:
+                raise ValueError(f"episode metadata is not 14-D at {path}:{line_number}")
+            records.append(record)
+    if not records:
+        raise ValueError(f"no atomic episodes in {path}")
+    return records
+
+
+def select_diverse_atomic_episodes(records, *, split, count, seed):
+    """Greedily balance task, fruit, arm, family, preload count and layout."""
+    candidates = [record for record in records if split == "all" or record["split"] == split]
+    if count < 1:
+        raise ValueError("atomic trial count must be positive")
+    if count > len(candidates):
+        raise ValueError(
+            f"requested {count} atomic trials, but split {split!r} has {len(candidates)}"
+        )
+
+    rng = np.random.default_rng(seed)
+    tie_break = {int(record["episode_index"]): float(rng.random()) for record in candidates}
+    feature_counts = [dict() for _ in range(6)]
+    selected = []
+    remaining = list(candidates)
+
+    def features(record):
+        return (
+            record.get("task_type"),
+            record.get("target_fruit") or "basket",
+            record.get("used_arm") or "both",
+            record.get("scenario_family"),
+            len(record.get("preloaded_fruits", ())),
+            int(record.get("layout_index", -1)),
+        )
+
+    while len(selected) < count:
+        def score(record):
+            values = features(record)
+            balance = sum(1.0 / (1 + feature_counts[i].get(value, 0)) for i, value in enumerate(values))
+            return balance, tie_break[int(record["episode_index"])]
+
+        chosen = max(remaining, key=score)
+        remaining.remove(chosen)
+        selected.append(chosen)
+        for index, value in enumerate(features(chosen)):
+            feature_counts[index][value] = feature_counts[index].get(value, 0) + 1
+    return selected
+
+
+def randomize_atomic_suite_scenes(records, *, seed, grid_config):
+    """Create reproducible, balanced in-distribution scenes for atomic evaluation.
+
+    The source record still supplies the task, prompt, scenario family and preload
+    condition. Only scene variables randomized during collection are regenerated.
+    Place trials alternate target sides so left/right reach is balanced even for a
+    short suite.
+    """
+    rng = np.random.default_rng(seed)
+    count = len(records)
+    layout_total = layout_count(grid_config)
+
+    layouts = []
+    while len(layouts) < count:
+        layouts.extend(int(value) for value in rng.permutation(layout_total))
+
+    place_count = sum(record.get("task_type") == "place_one" for record in records)
+    target_sides = ["left" if index % 2 == 0 else "right" for index in range(place_count)]
+    rng.shuffle(target_sides)
+    side_index = 0
+    randomized = []
+    for trial_index, source in enumerate(records):
+        spec = dict(source)
+        spec.update(
+            source_episode_index=int(source["episode_index"]),
+            source_layout_index=int(source["layout_index"]),
+            source_slot_order=list(source["slot_order"]),
+            source_seed=int(source["seed"]),
+            scene_mode="randomized_grid",
+            layout_index=layouts[trial_index],
+            seed=int(rng.integers(0, 2**31 - 1)),
+        )
+
+        order = list(OBJECT_TYPES)
+        rng.shuffle(order)
+        if source.get("task_type") == "place_one":
+            target = str(source["target_fruit"])
+            side = target_sides[side_index]
+            side_index += 1
+            target_slot = int(rng.choice((0, 1) if side == "left" else (2, 3)))
+            order.remove(target)
+            rng.shuffle(order)
+            order.insert(target_slot, target)
+            spec["used_arm"] = side
+        else:
+            spec["used_arm"] = "both"
+        spec["slot_order"] = order
+        randomized.append(spec)
+    return randomized
+
+
+def atomic_experiment_snapshot(
+    *, dataset_root, scene_mode, suite_seed, scene_limits, specs
+):
+    """Return the stable configuration used to guard resumable result files."""
+    fields = (
+        "episode_index", "source_episode_index", "plan_index", "split",
+        "scenario_family", "task_type", "target_fruit", "used_arm",
+        "preloaded_fruits", "layout_index", "slot_order", "seed", "prompt",
+    )
+    return {
+        "version": 1,
+        "dataset": str(pathlib.Path(dataset_root).resolve()),
+        "scene_mode": scene_mode,
+        "suite_seed": int(suite_seed),
+        "scene_limits": scene_limits,
+        "trials": [
+            {key: spec.get(key) for key in fields if key in spec}
+            for spec in specs
+        ],
+    }
+
+
+def completed_atomic_episode_ids(path):
+    path = pathlib.Path(path)
+    if not path.exists():
+        return set()
+    completed = set()
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("status") != "interrupted":
+                completed.add(int(record["episode_index"]))
+    return completed
+
+
+def write_atomic_experiment_report(results_path, output_dir):
+    """Write machine-readable, tabular and visual summaries for atomic trials."""
+    results_path = pathlib.Path(results_path)
+    output_dir = pathlib.Path(output_dir)
+    rows = [
+        json.loads(line)
+        for line in results_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if not rows:
+        return
+
+    csv_fields = (
+        "episode_index", "source_episode_index", "scene_mode", "split",
+        "scenario_family", "task_type", "target_fruit", "used_arm",
+        "preloaded_count", "layout_index", "slot_order", "seed", "prompt",
+        "status", "success", "steps", "sim_seconds", "wall_seconds",
+        "inference_ms_mean", "failure_reason",
+    )
+    with (output_dir / "results.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=csv_fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field) for field in csv_fields})
+
+    def grouped(field):
+        values = {}
+        for row in rows:
+            key = str(row.get(field) if row.get(field) is not None else "none")
+            bucket = values.setdefault(key, {"trials": 0, "successes": 0, "steps": []})
+            bucket["trials"] += 1
+            bucket["successes"] += int(bool(row.get("success")))
+            bucket["steps"].append(int(row.get("steps", 0)))
+        return {
+            key: {
+                "trials": value["trials"],
+                "successes": value["successes"],
+                "success_rate": value["successes"] / value["trials"],
+                "mean_steps": float(np.mean(value["steps"])),
+            }
+            for key, value in sorted(values.items())
+        }
+
+    groups = {
+        "task": grouped("task_type"),
+        "fruit": grouped("target_fruit"),
+        "arm": grouped("used_arm"),
+        "family": grouped("scenario_family"),
+        "preloaded_count": grouped("preloaded_count"),
+    }
+    successes = sum(bool(row.get("success")) for row in rows)
+    summary = {
+        "trials": len(rows),
+        "successes": successes,
+        "success_rate": successes / len(rows),
+        "groups": groups,
+    }
+    (output_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+    lines = [
+        "# RBY1 atomic policy experiment",
+        "",
+        f"- Trials: {len(rows)}",
+        f"- Successes: {successes}",
+        f"- Success rate: {successes / len(rows):.1%}",
+    ]
+    for title, key in (
+        ("Task", "task"),
+        ("Target fruit", "fruit"),
+        ("Used arm", "arm"),
+        ("Scenario family", "family"),
+        ("Preloaded fruit count", "preloaded_count"),
+    ):
+        lines.extend(("", f"## {title}", "", "| Group | Trials | Successes | Rate | Mean steps |", "|---|---:|---:|---:|---:|"))
+        for name, value in groups[key].items():
+            lines.append(
+                f"| {name} | {value['trials']} | {value['successes']} | "
+                f"{value['success_rate']:.1%} | {value['mean_steps']:.1f} |"
+            )
+    (output_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    matplotlib_cache = output_dir / ".matplotlib"
+    matplotlib_cache.mkdir(exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_cache))
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axes = plt.subplots(2, 2, figsize=(13, 9))
+    for axis, (title, key) in zip(
+        axes.flat,
+        (("Target fruit", "fruit"), ("Used arm", "arm"),
+         ("Scenario family", "family"), ("Preloaded fruits", "preloaded_count")),
+    ):
+        labels = list(groups[key])
+        rates = [groups[key][label]["success_rate"] for label in labels]
+        counts = [groups[key][label]["trials"] for label in labels]
+        bars = axis.bar(labels, rates, color="#3a7ca5")
+        axis.set_ylim(0.0, 1.05)
+        axis.set_ylabel("Success rate")
+        axis.set_title(title)
+        axis.tick_params(axis="x", rotation=25)
+        for bar, count in zip(bars, counts):
+            axis.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+                      f"n={count}", ha="center", va="bottom", fontsize=8)
+    figure.tight_layout()
+    figure.savefig(output_dir / "success_rates.png", dpi=160)
+    plt.close(figure)
+
+    figure, axis = plt.subplots(figsize=(12, 4.5))
+    trial_numbers = np.arange(1, len(rows) + 1)
+    step_values = [int(row.get("steps", 0)) for row in rows]
+    colors = ["#2ca02c" if row.get("success") else "#d62728" for row in rows]
+    axis.scatter(trial_numbers, step_values, c=colors, s=45)
+    axis.set_xlabel("Trial order")
+    axis.set_ylabel("Executed action steps")
+    axis.set_title("Atomic episode outcomes (green=success, red=failure)")
+    axis.grid(alpha=0.25)
+    figure.tight_layout()
+    figure.savefig(output_dir / "episode_outcomes.png", dpi=160)
+    plt.close(figure)
+    print(f"atomic report written to {output_dir}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=list(MODELS.keys()), default="droid",
@@ -637,6 +1002,52 @@ def main():
         default=0.02,
         help="hold the robot when its collision geometry comes this close to an obstacle",
     )
+    atomic_mode = ap.add_mutually_exclusive_group()
+    atomic_mode.add_argument(
+        "--atomic-episode-index",
+        type=int,
+        default=None,
+        help="run one collected atomic dataset episode by episode_index",
+    )
+    atomic_mode.add_argument(
+        "--atomic-suite",
+        action="store_true",
+        help="run a balanced set of collected atomic episodes and generate reports",
+    )
+    ap.add_argument(
+        "--atomic-dataset",
+        type=pathlib.Path,
+        default=ATOMIC_DATASET_DEFAULT,
+        help="rby1_atomic_basket_14d_v2 dataset root",
+    )
+    ap.add_argument(
+        "--atomic-split",
+        choices=("train", "validation", "test", "all"),
+        default="test",
+        help="dataset split sampled by --atomic-suite (default: held-out test)",
+    )
+    ap.add_argument("--atomic-trials", type=int, default=24)
+    ap.add_argument("--atomic-seed", type=int, default=20260831)
+    ap.add_argument(
+        "--atomic-scene-mode",
+        choices=("auto", "replay", "randomized"),
+        default="auto",
+        help="scene placement: auto replays a single episode and randomizes a suite "
+             "within the collection grid/jitter limits",
+    )
+    ap.add_argument(
+        "--atomic-output-dir",
+        type=pathlib.Path,
+        default=pathlib.Path("outputs/rby1_atomic_eval"),
+    )
+    ap.add_argument(
+        "--atomic-record",
+        choices=("none", "failures", "all"),
+        default="none",
+        help="save per-trial third-person videos; report plots are always generated",
+    )
+    ap.add_argument("--atomic-save-trajectories", action="store_true")
+    ap.add_argument("--no-atomic-resume", action="store_true")
     ap.add_argument(
         "--grid-experiment",
         action="store_true",
@@ -702,8 +1113,9 @@ def main():
         args.grid_save_trajectories = True
     # The grid evaluation is recorded from a fixed front view so every trial video is
     # comparable; an explicit --view still wins.
+    is_atomic_experiment = args.atomic_suite or args.atomic_episode_index is not None
     if args.view is None:
-        args.view = "front" if args.grid_experiment else "free"
+        args.view = "front" if args.grid_experiment or is_atomic_experiment else "free"
 
     if args.start_delay < 0:
         ap.error("--start-delay must be non-negative")
@@ -715,6 +1127,19 @@ def main():
         ap.error("--grid-repeats must be >= 1")
     if args.trial_max_steps < 1:
         ap.error("--trial-max-steps must be >= 1")
+    if args.atomic_trials < 1:
+        ap.error("--atomic-trials must be >= 1")
+    if args.grid_experiment and is_atomic_experiment:
+        ap.error("--grid-experiment and atomic episode experiments are mutually exclusive")
+    if is_atomic_experiment and args.model != "rby1_transport_14d":
+        ap.error("atomic episode experiments require --model rby1_transport_14d")
+    if is_atomic_experiment and args.max_steps > 0:
+        ap.error("use --trial-max-steps instead of --max-steps with atomic experiments")
+    if is_atomic_experiment and (args.record or args.record_inputs or args.trajectory_out):
+        ap.error(
+            "use --atomic-record/--atomic-save-trajectories instead of single-run "
+            "artifact flags with atomic experiments"
+        )
     if args.grid_experiment and args.model != "rby1":
         ap.error("--grid-experiment requires --model rby1")
     if args.grid_experiment and args.max_steps > 0:
@@ -776,9 +1201,13 @@ def main():
     # What each rollout has to buffer. In grid mode the trajectory buffers are always
     # collected because BJ/IJ/CD/AVb for results.jsonl are derived from them, even when
     # --grid-save-trajectories is off and the raw NPZ is not written out.
-    capture_video = bool(args.record) or (args.grid_experiment and args.grid_record)
+    capture_video = (
+        bool(args.record)
+        or (args.grid_experiment and args.grid_record)
+        or (is_atomic_experiment and args.atomic_record != "none")
+    )
     capture_inputs = bool(args.record_inputs) or (args.grid_experiment and args.grid_record_inputs)
-    collect_trajectory = bool(args.trajectory_out) or args.grid_experiment
+    collect_trajectory = bool(args.trajectory_out) or args.grid_experiment or is_atomic_experiment
 
     # The scene follows the model: rby1_mobile needs the transport root, which
     # also supplies the base actuators its action format writes to.
@@ -792,6 +1221,18 @@ def main():
     d = mujoco.MjData(m)
     key = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "teleop")
     mujoco.mj_resetDataKeyframe(m, d, key)
+    teleop_arm6_targets = {}
+    teleop_arm_targets = {}
+    for side, joint_names in (
+        ("left", LEFT_ARM_JOINTS),
+        ("right", RIGHT_ARM_JOINTS),
+    ):
+        qpos_indices = [
+            m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, name)]
+            for name in joint_names
+        ]
+        teleop_arm_targets[side] = np.asarray(d.qpos[qpos_indices], dtype=float).copy()
+        teleop_arm6_targets[side] = float(teleop_arm_targets[side][6])
     # Without this, body/geom world transforms (xpos/xquat) are stale until the first
     # mj_step -- the very first observation (which drives the first action chunk) would
     # be rendered from a blank/garbage scene.
@@ -799,6 +1240,12 @@ def main():
 
     for i in range(m.nu):
         d.ctrl[i] = d.qpos[m.jnt_qposadr[m.actuator_trnid[i, 0]]]
+    if mcfg["obs_format"] in ("rby1", "rby1_mobile"):
+        reset_right_arm = right_arm_handles(m)
+        reset_left_arm = left_arm_handles(m)
+        open_grippers(
+            m, d, [reset_right_arm, reset_left_arm], secs=0.5, opening=1.0
+        )
 
     obstacle_manager = None
     if args.obstacle_profile != "clear":
@@ -840,17 +1287,20 @@ def main():
         "left_a":        [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, a) for a in LEFT_ARM_ACTS],
         "right_grip_a":  mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, GRIPPER_R_ACT),
         "left_grip_a":   mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, GRIPPER_L_ACT),
+        "left_arm6_hold": teleop_arm6_targets["left"],
+        "right_arm6_hold": teleop_arm6_targets["right"],
         # Empty on model.xml, which has no base actuators; only rby1_mobile uses it.
         "base_a":        [a for a in
                           (mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, n) for n in BASE_ACTS)
                           if a >= 0],
     }
 
-    # Policy-input renderer MUST match the training-data collection resolution exactly
-    # (rby1_manipulation/scenario*.py, collect_batch.py render at native 224x224).
-    # Rendering at a different aspect ratio (e.g. 640x480) and resizing down distorts
-    # the field of view relative to what the model was trained on.
-    renderer_pol = mujoco.Renderer(m, height=224, width=224)
+    if mcfg["obs_format"] in ("rby1", "rby1_mobile"):
+        renderer_pol = mujoco.Renderer(
+            m, height=POLICY_SOURCE_HEIGHT, width=POLICY_SOURCE_WIDTH
+        )
+    else:
+        renderer_pol = mujoco.Renderer(m, height=224, width=224)
     renderer_rec = mujoco.Renderer(m, height=480, width=640)  # third-person --record only
     recording_camera = -1
     if args.view != "free":
@@ -946,6 +1396,8 @@ def main():
         for t_step in range(step_limit):
             if chunk is None or chunk_step >= OPEN_LOOP_HORIZON:
                 obs = build_obs(mcfg["obs_format"], m, d, renderer_pol, idx, policy_prompt)
+                if mcfg["obs_format"] in ("rby1", "rby1_mobile"):
+                    validate_rby1_observation(obs, log=(t_step == 0))
                 if capture_inputs:
                     capture_policy_input_frames(obs, input_frame_buffers)
                 t_infer = time.time()
@@ -964,6 +1416,12 @@ def main():
                     result = policy.infer(obs)
                     chunk = np.asarray(result["actions"])
                     seam_timing = result.get("seam_timing", {})
+                if mcfg["action_format"] in ("rby1", "rby1_mobile"):
+                    validate_rby1_action_chunk(
+                        chunk,
+                        17 if mcfg["action_format"] == "rby1_mobile" else 14,
+                        log=(t_step == 0),
+                    )
                 infer_elapsed_ms = (time.time() - t_infer) * 1000.0
                 chunk_step = 0
 
@@ -1132,6 +1590,470 @@ def main():
             return None
 
         return stop_check
+
+    def reset_atomic_scene(spec, plan):
+        clear_episode_buffers()
+        randomization = RandomizationSpec()
+        if plan.get("random_scene", False):
+            randomization = RandomizationSpec(
+                crate_xy_jitter=float(plan.get("basket_jitter_m", 0.010)),
+                crate_yaw_jitter=float(plan.get("basket_yaw_jitter_rad", 0.05236)),
+                crate_mass_range=(0.65, 1.0),
+                friction_range=(0.9, 1.2),
+            )
+        scene = reset_fruit_grid_scene(
+            m,
+            d,
+            load_layout_config(),
+            load_fruit_grid_config(),
+            layout_index=int(spec["layout_index"]),
+            slot_order=tuple(spec["slot_order"]),
+            preloaded_objects=tuple(spec.get("preloaded_fruits", ())),
+            rng=np.random.default_rng(int(spec["seed"])),
+            randomize=randomization,
+            position_jitter_xy=(
+                float(plan.get("fruit_jitter_m", 0.006))
+                if plan.get("random_scene", False) else 0.0
+            ),
+            settle_seconds=1.5,
+        )
+        for actuator_id in range(m.nu):
+            joint_id = m.actuator_trnid[actuator_id, 0]
+            d.ctrl[actuator_id] = d.qpos[m.jnt_qposadr[joint_id]]
+        d.ctrl[act["left_a"][6]] = teleop_arm6_targets["left"]
+        d.ctrl[act["right_a"][6]] = teleop_arm6_targets["right"]
+        open_grippers(
+            m,
+            d,
+            [reset_right_arm, reset_left_arm],
+            secs=0.5,
+            opening=1.0,
+            viewer=ctx,
+        )
+        if obstacle_manager is not None:
+            obstacle_manager.activate(args.obstacle_profile)
+        mujoco.mj_forward(m, d)
+        # ``open_grippers`` advances physics for another 0.5 seconds. Refresh the
+        # recorded reset pose so result metadata describes the first policy input,
+        # rather than the earlier pre-gripper-settle state.
+        scene.actual_positions = {
+            fruit: transport_body_position(m, d, OBJECT_BODIES[fruit]).copy()
+            for fruit in OBJECT_TYPES
+        }
+        scene.state.crate_pose = free_body_pose(m, d, CRATE_JOINT)
+        if ctx is not None:
+            ctx.sync()
+        return scene
+
+    def make_atomic_stop_check(spec):
+        task_type = str(spec["task_type"])
+        target = spec.get("target_fruit")
+        used_arm = str(spec.get("used_arm") or "left")
+        arm = reset_left_arm if used_arm == "left" else reset_right_arm
+        arms = {"left": reset_left_arm, "right": reset_right_arm}
+        initial_membership = objects_in_crate(m, d)
+        initial_positions = {
+            fruit: transport_body_position(m, d, OBJECT_BODIES[fruit]).copy()
+            for fruit in OBJECT_TYPES
+        }
+        initial_crate_z = float(transport_body_position(m, d, CRATE_BODY)[2])
+        max_non_target_displacement = {
+            fruit: 0.0
+            for fruit in OBJECT_TYPES
+            if fruit != target and not initial_membership[fruit]
+        }
+        state = {
+            "stable_steps": 0,
+            "failure_reason": None,
+            "validation": {},
+        }
+
+        def linear_speed(joint_name):
+            joint_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            dof_address = int(m.jnt_dofadr[joint_id])
+            return float(np.linalg.norm(d.qvel[dof_address:dof_address + 3]))
+
+        def evaluate():
+            membership = objects_in_crate(m, d)
+            preloaded = tuple(spec.get("preloaded_fruits", ()))
+            preloaded_remain = all(membership[fruit] for fruit in preloaded)
+            if task_type == "lift_basket":
+                crate_position = transport_body_position(m, d, CRATE_BODY)
+                lift_height = float(crate_position[2] - initial_crate_z)
+                grasp = check_grasp(m, d, arms, CRATE_BODY)
+                crate_speed = linear_speed(CRATE_JOINT)
+                checks = {
+                    "basket_grasp_held": bool(grasp.ok),
+                    "basket_lift_height_m": lift_height,
+                    "basket_lifted": lift_height >= ATOMIC_LIFT_HEIGHT_M,
+                    "basket_speed_mps": crate_speed,
+                    "preloaded_fruits_remain": preloaded_remain,
+                }
+                core_success = bool(
+                    checks["basket_grasp_held"]
+                    and checks["basket_lifted"]
+                    and crate_speed <= ATOMIC_TARGET_SPEED_MPS
+                    and preloaded_remain
+                )
+                return checks, core_success
+
+            target_position = transport_body_position(m, d, OBJECT_BODIES[target])
+            target_speed = linear_speed(OBJECT_JOINTS[target])
+            for fruit in max_non_target_displacement:
+                displacement = float(np.linalg.norm(
+                    transport_body_position(m, d, OBJECT_BODIES[fruit])
+                    - initial_positions[fruit]
+                ))
+                max_non_target_displacement[fruit] = max(
+                    max_non_target_displacement[fruit], displacement
+                )
+            non_target_inserted = any(
+                membership[fruit] and not initial_membership[fruit]
+                for fruit in OBJECT_TYPES if fruit != target
+            )
+            non_target_unchanged = all(
+                value <= ATOMIC_NON_TARGET_DISPLACEMENT_M
+                for value in max_non_target_displacement.values()
+            )
+            grip_fraction = float(
+                abs(d.qpos[arm.gripper_qidx]) / abs(RBY1_GRIPPER_OPEN)
+            )
+            released = grip_fraction >= 0.70 and not check_grasp(
+                m, d, {used_arm: arm}, OBJECT_BODIES[target]
+            ).ok
+            ee_position = np.asarray(d.site_xpos[arm.ee_site_id], dtype=float)
+            crate_position = transport_body_position(m, d, CRATE_BODY)
+            target_clearance = float(np.linalg.norm(ee_position - target_position))
+            retreat_above_rim = float(
+                ee_position[2] - (crate_position[2] + float(CRATE_HALF[2]))
+            )
+            ready_error = float(np.max(np.abs(
+                np.asarray(d.qpos[arm.qidx[:6]]) - teleop_arm_targets[used_arm][:6]
+            )))
+            checks = {
+                "target_newly_inside": bool(
+                    membership[target] and not initial_membership[target]
+                ),
+                "fully_released": bool(released),
+                "target_speed_mps": target_speed,
+                "target_stable": target_speed <= ATOMIC_TARGET_SPEED_MPS,
+                "non_target_inserted": bool(non_target_inserted),
+                "non_target_max_displacement_m": dict(max_non_target_displacement),
+                "non_target_unchanged": bool(non_target_unchanged),
+                "preloaded_fruits_remain": bool(preloaded_remain),
+                "retreat_target_clearance_m": target_clearance,
+                "retreat_above_rim_m": retreat_above_rim,
+                "safe_retreat": bool(
+                    target_clearance >= ATOMIC_RETREAT_CLEARANCE_M
+                    and retreat_above_rim >= ATOMIC_RETREAT_ABOVE_RIM_M
+                ),
+                "used_arm_ready_error_rad": ready_error,
+                "returned_to_ready": ready_error <= ATOMIC_READY_ERROR_RAD,
+            }
+            core_success = bool(
+                checks["target_newly_inside"]
+                and checks["fully_released"]
+                and checks["target_stable"]
+                and not checks["non_target_inserted"]
+                and checks["non_target_unchanged"]
+                and checks["preloaded_fruits_remain"]
+                and checks["safe_retreat"]
+                and checks["returned_to_ready"]
+            )
+            return checks, core_success
+
+        def failure_reason(checks):
+            if task_type == "lift_basket":
+                if not checks.get("preloaded_fruits_remain", True):
+                    return "preloaded_fruit_ejected"
+                if not checks.get("basket_lifted", False):
+                    return "basket_not_lifted"
+                if not checks.get("basket_grasp_held", False):
+                    return "basket_not_grasped"
+                return "terminal_hold_invalid"
+            for key, reason, expected in (
+                ("target_newly_inside", "target_outside_basket", True),
+                ("fully_released", "incomplete_release", True),
+                ("target_stable", "target_unstable", True),
+                ("non_target_inserted", "non_target_inserted", False),
+                ("non_target_unchanged", "non_target_moved", True),
+                ("preloaded_fruits_remain", "preloaded_fruit_ejected", True),
+                ("safe_retreat", "unsafe_retreat", True),
+                ("returned_to_ready", "arm_return_failed", True),
+            ):
+                if checks.get(key) != expected:
+                    return reason
+            return "terminal_hold_invalid"
+
+        def stop_check(_step):
+            checks, core_success = evaluate()
+            state["stable_steps"] = state["stable_steps"] + 1 if core_success else 0
+            checks["terminal_hold_steps"] = state["stable_steps"]
+            checks["terminal_hold_valid"] = (
+                state["stable_steps"] >= ATOMIC_TERMINAL_HOLD_STEPS
+            )
+            state["validation"] = checks
+            if checks["terminal_hold_valid"]:
+                return "success"
+            if task_type == "place_one":
+                position = transport_body_position(m, d, OBJECT_BODIES[target])
+                if position[2] < 0.70 or position[0] < 0.30 or position[0] > 1.0 or abs(position[1]) > 0.55:
+                    state["failure_reason"] = "target_unrecoverable"
+                    return "failure"
+            return None
+
+        def final_result():
+            checks, _ = evaluate()
+            checks["terminal_hold_steps"] = state["stable_steps"]
+            checks["terminal_hold_valid"] = (
+                state["stable_steps"] >= ATOMIC_TERMINAL_HOLD_STEPS
+            )
+            state["validation"] = checks
+            if state["failure_reason"] is None and not checks["terminal_hold_valid"]:
+                state["failure_reason"] = failure_reason(checks)
+            return state
+
+        return stop_check, final_result
+
+    def run_atomic_experiment():
+        dataset_root = args.atomic_dataset.resolve()
+        episode_records = load_atomic_episode_records(dataset_root)
+        if args.atomic_episode_index is not None:
+            matches = [
+                record for record in episode_records
+                if int(record["episode_index"]) == args.atomic_episode_index
+            ]
+            if not matches:
+                raise ValueError(
+                    f"episode_index {args.atomic_episode_index} not found in {dataset_root}"
+                )
+            trial_specs = matches
+        else:
+            trial_specs = select_diverse_atomic_episodes(
+                episode_records,
+                split=args.atomic_split,
+                count=args.atomic_trials,
+                seed=args.atomic_seed,
+            )
+
+        plan_path = dataset_root / "atomic_collection_plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        fruit_grid = load_fruit_grid_config()
+        local_grid_fingerprint = fruit_grid_fingerprint(fruit_grid)
+        planned_grid_fingerprint = plan.get("fruit_grid_fingerprint")
+        if (
+            planned_grid_fingerprint
+            and planned_grid_fingerprint != local_grid_fingerprint
+        ):
+            raise ValueError(
+                "local fruit grid does not match the dataset collection plan: "
+                f"{local_grid_fingerprint} != {planned_grid_fingerprint}"
+            )
+        scene_limits = {
+            "fruit_grid_fingerprint": local_grid_fingerprint,
+            "layout_count": layout_count(fruit_grid),
+            "fruit_jitter_xy_m": float(plan.get("fruit_jitter_m", 0.006)),
+            "basket_jitter_xy_m": float(plan.get("basket_jitter_m", 0.010)),
+            "basket_yaw_jitter_rad": float(plan.get("basket_yaw_jitter_rad", 0.05236)),
+            "crate_mass_range_kg": [0.65, 1.0],
+            "friction_multiplier_range": [0.9, 1.2],
+        }
+        scene_mode = args.atomic_scene_mode
+        if scene_mode == "auto":
+            scene_mode = "randomized" if args.atomic_suite else "replay"
+        if scene_mode == "randomized":
+            trial_specs = randomize_atomic_suite_scenes(
+                trial_specs,
+                seed=args.atomic_seed,
+                grid_config=fruit_grid,
+            )
+        else:
+            trial_specs = [dict(spec, scene_mode="episode_replay") for spec in trial_specs]
+
+        output_dir = args.atomic_output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+        results_path = output_dir / "results.jsonl"
+        snapshot = atomic_experiment_snapshot(
+            dataset_root=dataset_root,
+            scene_mode=scene_mode,
+            suite_seed=args.atomic_seed,
+            scene_limits=scene_limits,
+            specs=trial_specs,
+        )
+        experiment_config_path = output_dir / "experiment_config.json"
+        if experiment_config_path.exists():
+            previous_snapshot = json.loads(experiment_config_path.read_text(encoding="utf-8"))
+            if previous_snapshot != snapshot:
+                raise ValueError(
+                    f"{experiment_config_path} belongs to a different atomic experiment; "
+                    "select a new --atomic-output-dir to avoid mixing results"
+                )
+        else:
+            experiment_config_path.write_text(
+                json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        completed = (
+            set() if args.no_atomic_resume else completed_atomic_episode_ids(results_path)
+        )
+        selected_path = output_dir / "selected_episodes.json"
+        selected_path.write_text(
+            json.dumps(
+                [
+                    {
+                        key: spec.get(key)
+                        for key in (
+                            "episode_index", "source_episode_index", "plan_index", "split",
+                            "scenario_family", "task_type", "target_fruit", "used_arm",
+                            "preloaded_fruits", "scene_mode", "source_layout_index",
+                            "source_slot_order", "source_seed", "layout_index",
+                            "slot_order", "seed", "prompt",
+                        )
+                    }
+                    for spec in trial_specs
+                ],
+                indent=2,
+                ensure_ascii=False,
+            ) + "\n",
+            encoding="utf-8",
+        )
+        print(
+            "\n=== RBY1 atomic episode experiment ===\n"
+            f"  dataset : {dataset_root}\n"
+            f"  split   : {args.atomic_split}\n"
+            f"  scenes  : {scene_mode} (seed={args.atomic_seed})\n"
+            f"  limits  : {scene_limits['layout_count']} layouts, "
+            f"fruit ±{scene_limits['fruit_jitter_xy_m'] * 1000:.0f} mm, "
+            f"basket ±{scene_limits['basket_jitter_xy_m'] * 100:.0f} cm / "
+            f"±{np.degrees(scene_limits['basket_yaw_jitter_rad']):.1f} deg\n"
+            f"  trials  : {len(trial_specs)}\n"
+            f"  output  : {output_dir}"
+        )
+
+        for ordinal, spec in enumerate(trial_specs, start=1):
+            episode_index = int(spec["episode_index"])
+            if episode_index in completed:
+                print(f"[{ordinal:03d}/{len(trial_specs)}] SKIP episode {episode_index}")
+                continue
+            if ctx is not None and not ctx.is_running():
+                break
+            scene = reset_atomic_scene(spec, plan)
+            expected_preloaded = set(spec.get("preloaded_fruits", ()))
+            actual_preloaded = {
+                fruit for fruit, inside in objects_in_crate(m, d).items() if inside
+            }
+            setup_errors = []
+            if expected_preloaded != actual_preloaded:
+                setup_errors.append(
+                    f"preloaded mismatch expected={sorted(expected_preloaded)} "
+                    f"actual={sorted(actual_preloaded)}"
+                )
+            stop_check, final_result = make_atomic_stop_check(spec)
+            prompt = str(spec.get("prompt") or spec.get("canonical_prompt"))
+            print(
+                f"\n[{ordinal:03d}/{len(trial_specs)}] episode={episode_index} "
+                f"family={spec['scenario_family']} prompt={prompt!r}\n"
+                f"  target={spec.get('target_fruit')} arm={spec.get('used_arm')} "
+                f"preloaded={tuple(spec.get('preloaded_fruits', ()))} "
+                f"layout={scene.layout_index} slots={scene.slot_order}"
+            )
+            started_at = datetime.now(timezone.utc)
+            if setup_errors:
+                outcome = {"status": "setup_error", "steps": 0}
+            else:
+                if seam_session is not None:
+                    seam_session.reset()
+                if not wait_before_inference():
+                    outcome = {"status": "interrupted", "steps": 0}
+                else:
+                    outcome = loop_body(
+                        prompt=prompt,
+                        max_steps=args.trial_max_steps,
+                        stop_check=stop_check,
+                    )
+            monitor = final_result()
+            finished_at = datetime.now(timezone.utc)
+            success = outcome["status"] == "success"
+            record = {
+                "episode_index": episode_index,
+                "source_episode_index": int(spec.get("source_episode_index", episode_index)),
+                "scene_mode": spec["scene_mode"],
+                "plan_index": int(spec["plan_index"]),
+                "split": spec["split"],
+                "scenario_family": spec["scenario_family"],
+                "task_type": spec["task_type"],
+                "target_fruit": spec.get("target_fruit"),
+                "used_arm": spec.get("used_arm") or "both",
+                "preloaded_fruits": list(spec.get("preloaded_fruits", ())),
+                "preloaded_count": len(spec.get("preloaded_fruits", ())),
+                "layout_index": int(spec["layout_index"]),
+                "slot_order": list(spec["slot_order"]),
+                "seed": int(spec["seed"]),
+                "source_layout_index": int(spec.get("source_layout_index", spec["layout_index"])),
+                "source_slot_order": list(spec.get("source_slot_order", spec["slot_order"])),
+                "source_seed": int(spec.get("source_seed", spec["seed"])),
+                "requested_fruit_positions": {
+                    fruit: np.asarray(position, dtype=float).tolist()
+                    for fruit, position in scene.requested_positions.items()
+                },
+                "actual_fruit_positions": {
+                    fruit: np.asarray(position, dtype=float).tolist()
+                    for fruit, position in scene.actual_positions.items()
+                },
+                "basket_pose": np.asarray(scene.state.crate_pose, dtype=float).tolist(),
+                "prompt": prompt,
+                "status": outcome["status"],
+                "success": success,
+                "failure_reason": None if success else (
+                    "; ".join(setup_errors) if setup_errors else monitor["failure_reason"]
+                ),
+                "steps": int(outcome["steps"]),
+                "sim_seconds": float(outcome["steps"] / CTRL_HZ),
+                "wall_seconds": (finished_at - started_at).total_seconds(),
+                "validation": monitor["validation"],
+                "motion_metrics": compute_trial_metrics(executed_actions, measured_states),
+                "num_chunks": len(predicted_chunks),
+                "inference_ms_mean": (
+                    _json_float(np.mean(inference_ms)) if inference_ms else None
+                ),
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+            }
+            artifact_stem = f"episode_{episode_index:06d}"
+            save_trial_video = args.atomic_record == "all" or (
+                args.atomic_record == "failures" and not success
+            )
+            if save_trial_video and video_frames:
+                video_path = output_dir / "videos" / f"{artifact_stem}.mp4"
+                save_video(video_path, video_frames)
+                record["video"] = str(video_path)
+            if args.atomic_save_trajectories and executed_actions:
+                trajectory_path = output_dir / "trajectories" / f"{artifact_stem}.npz"
+                save_trajectory(
+                    trajectory_path,
+                    executed_actions=executed_actions,
+                    measured_states=measured_states,
+                    predicted_chunks=predicted_chunks,
+                    chunk_start_steps=chunk_start_steps,
+                    inference_states=inference_states,
+                    inference_ms=inference_ms,
+                    inference_used_vls=inference_used_vls,
+                    inference_chunk_indices=inference_chunk_indices,
+                    prompt=prompt,
+                    condition="seam" if args.seam else "baseline",
+                )
+                record["trajectory"] = str(trajectory_path)
+            append_jsonl(results_path, record)
+            print(
+                f"[{ordinal:03d}/{len(trial_specs)}] {outcome['status'].upper()} "
+                f"episode={episode_index} steps={outcome['steps']} "
+                f"reason={record['failure_reason']}"
+            )
+            if outcome["status"] == "interrupted":
+                break
+
+        if results_path.exists():
+            write_atomic_experiment_report(results_path, output_dir)
 
     def run_grid_experiment():
         config = load_grid_config(args.grid_config)
@@ -1347,7 +2269,9 @@ def main():
                 return
 
     try:
-        if args.grid_experiment:
+        if is_atomic_experiment:
+            run_atomic_experiment()
+        elif args.grid_experiment:
             run_grid_experiment()
         elif wait_before_inference():
             loop_body()
@@ -1358,11 +2282,16 @@ def main():
             print(f"obstacle safety summary: {obstacle_manager.summary()}")
         if ctx is not None:
             ctx.close()
-        if not args.grid_experiment and args.record and video_frames:
+        if not args.grid_experiment and not is_atomic_experiment and args.record and video_frames:
             save_video(args.record, video_frames)
-        if not args.grid_experiment and args.record_inputs:
+        if not args.grid_experiment and not is_atomic_experiment and args.record_inputs:
             save_policy_input_videos(args.record_inputs, input_frame_buffers)
-        if not args.grid_experiment and args.trajectory_out and executed_actions:
+        if (
+            not args.grid_experiment
+            and not is_atomic_experiment
+            and args.trajectory_out
+            and executed_actions
+        ):
             trajectory_condition = "seam" if args.seam else "baseline"
             if args.obstacle_profile != "clear":
                 trajectory_condition += f"__obstacle_{args.obstacle_profile}"

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
+
 from rby1_manipulation.control.bimanual import BiWaypoint
 from rby1_manipulation.data.collect_transport_dataset import (
     build_schedule,
@@ -13,6 +15,7 @@ from rby1_manipulation.data.collect_transport_dataset import (
 from rby1_manipulation.simulation.fruit_grid import (
     layout_count,
     load_fruit_grid_config,
+    offset_table_placements_from_basket,
 )
 from rby1_manipulation.tasks.transport_pack_lift import (
     DEFAULT_SPEED_SCALE,
@@ -91,6 +94,36 @@ class TransportCollectionTest(unittest.TestCase):
 
     def test_fruit_grid_has_16_safe_layouts(self) -> None:
         self.assertEqual(layout_count(load_fruit_grid_config()), 16)
+
+    def test_inference_offset_moves_only_table_fruits_away_from_basket(self) -> None:
+        basket_xy = np.array([0.52, 0.0])
+        placements = {
+            "apple": np.array([0.46, 0.305, 0.82]),
+            "banana": np.array([0.55, 0.305, 0.82]),
+            "pear": np.array([0.52, 0.0, 0.86]),
+        }
+        shifted = offset_table_placements_from_basket(
+            placements,
+            basket_xy,
+            offset_m=0.10,
+            excluded_objects=("pear",),
+        )
+
+        for fruit in ("apple", "banana"):
+            old_distance = np.linalg.norm(placements[fruit][:2] - basket_xy)
+            new_distance = np.linalg.norm(shifted[fruit][:2] - basket_xy)
+            self.assertAlmostEqual(new_distance - old_distance, 0.10)
+            self.assertEqual(shifted[fruit][2], placements[fruit][2])
+        np.testing.assert_array_equal(shifted["pear"], placements["pear"])
+        np.testing.assert_array_equal(placements["apple"], [0.46, 0.305, 0.82])
+
+    def test_inference_offset_rejects_negative_distance(self) -> None:
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            offset_table_placements_from_basket(
+                {"apple": np.array([0.46, 0.305, 0.82])},
+                [0.52, 0.0],
+                offset_m=-0.10,
+            )
 
     def test_default_timing_is_accelerated_without_mutating_input(self) -> None:
         original = BiWaypoint("test", duration=2.0, wait_after=0.5)
