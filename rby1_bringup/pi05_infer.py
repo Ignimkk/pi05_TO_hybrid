@@ -498,6 +498,32 @@ def main():
                          "inference step holding qpos, the 14-D state, the three 224x224 policy "
                          "images verbatim, and the returned chunk. Depth and segmentation are NOT "
                          "stored -- qpos regenerates them deterministically via TransportScene")
+    ap.add_argument("--safe-remote", action="store_true",
+                    help="서버가 π0.5+SEAM+AG3S+TO를 한 프로세스로 돌린다. 로컬은 3카메라 "
+                         "관측을 보내고, 서버의 안전 판정이 유효할 때만 앞 8개 action을 "
+                         "실행한다. unsafe·timeout·오래된 응답·서버 오류면 현재 관절을 hold")
+    ap.add_argument("--safe-timeout", type=float, default=2.0, metavar="SEC",
+                    help="서버 응답 제한 시간. 넘으면 hold")
+    ap.add_argument("--safe-phase", default="approach",
+                    help="AG3S에 주입할 조작 단계. AG3S는 절대 추론하지 않는다")
+    ap.add_argument("--safe-manipulators", nargs="*", default=(), metavar="NAME",
+                    help="접촉이 허용된 매니퓰레이터")
+    ap.add_argument("--trajopt", action="store_true",
+                    help="AG3S(attention + ESDF)로 충돌 제약을 만들고 TO로 청크를 정제해 "
+                         "**그 결과를 실행**한다. 붙이지 않으면 루프는 예전과 동일하다")
+    ap.add_argument("--trajopt-links", choices=("arms", "all"), default="arms",
+                    help="충돌 제약을 어느 링크에 걸지. arms는 양팔과 손끝만 — 바퀴·베이스는 "
+                         "결정 변수가 아니라 고칠 수 없는 위반을 상수로 깔아 실제 신호를 묻는다")
+    ap.add_argument("--trajopt-cameras", nargs="*", default=None, metavar="CAMERA",
+                    help="AG3S가 쓸 MuJoCo 카메라. 기본 zed_left wrist_cam_l wrist_cam_r")
+    ap.add_argument("--trace", default=None, metavar="DIR",
+                    help="제어 루프의 벽시계 타임스탬프를 trace.jsonl로 기록")
+    ap.add_argument("--record-constraints", default=None, metavar="DIR",
+                    help="AG3S의 제약 생성 중간 산출물(attention·점군·target·ESDF·여유거리)을 "
+                         "청크마다 npz로 기록. 시각화가 이것만으로 재현된다")
+    ap.add_argument("--record-constraints-esdf", choices=("none", "occupancy", "full"),
+                    default="full",
+                    help="거리장을 얼마나 저장할지. full은 청크당 약 1.2 MB (20 mm 복셀 실측)")
     ap.add_argument("--record-depth", nargs="*", default=None,
                     metavar="CAMERA",
                     help="with --record-ag3s, also store depth + intrinsics + extrinsics for these "
@@ -624,6 +650,16 @@ def main():
         ap.error("--record-ag3s requires --model rby1 (AG3S is wired to the RB-Y1 cameras)")
     if args.record_depth is not None and not args.record_ag3s:
         ap.error("--record-depth only does something together with --record-ag3s")
+    if args.safe_remote and not args.remote:
+        ap.error("--safe-remote requires --remote (the safety layer runs on the server)")
+    if args.safe_remote and args.trajopt:
+        ap.error("--safe-remote and --trajopt are two places to run the same layer; pick one")
+    if args.safe_remote and mcfg["obs_format"] != "rby1":
+        ap.error("--safe-remote requires --model rby1 (AG3S is wired to the RB-Y1 cameras)")
+    if args.trajopt and mcfg["obs_format"] != "rby1":
+        ap.error("--trajopt requires --model rby1 (AG3S is wired to the RB-Y1 cameras)")
+    if args.record_constraints and not args.trajopt:
+        ap.error("--record-constraints only does something together with --trajopt")
     print(f"=== Model: {args.model} ===")
     if args.remote:
         print(f"  remote     : {args.remote}  (server must serve obs_format={mcfg['obs_format']!r})")
@@ -806,6 +842,95 @@ def main():
     video_frames = []
     input_frame_buffers = {name: [] for name in POLICY_CAMERA_NAMES}
 
+    safe_client = None
+    if args.safe_remote:
+        workspace_root = REPO_ROOT.parent
+        if str(workspace_root) not in sys.path:
+            sys.path.insert(0, str(workspace_root))
+        from benchmark.ag3s.experiments.mujoco_source import TransportScene
+        from benchmark.trajopt import wire
+        from benchmark.trajopt.client import SafeRemoteClient
+
+        # `attach` 는 이 프로세스가 이미 돌리고 있는 `m`/`d` 를 그대로 가리킨다. 두 번째
+        # 시뮬레이션이 아니다 — 두 벌이면 로봇이 있는 곳과 서버가 보는 곳이 갈라진다.
+        safe_client = SafeRemoteClient(
+            policy=policy,
+            scene=TransportScene.attach(m, d),
+            cameras=tuple(args.trajopt_cameras or wire.DEFAULT_CAMERAS),
+            timeout_s=args.safe_timeout,
+            phase=args.safe_phase,
+            active_manipulators=tuple(args.safe_manipulators),
+            trace_dir=args.trace,
+        )
+        print(f"[safe] server-side AG3S+TO; cameras={safe_client.cameras} "
+              f"timeout={args.safe_timeout:.1f}s")
+
+    live_pipeline = None
+    if args.trajopt:
+        # 벤치마크 패키지는 src/ 한 단계 위에 있다 (`--record-ag3s` 와 같은 규칙).
+        workspace_root = REPO_ROOT.parent
+        if str(workspace_root) not in sys.path:
+            sys.path.insert(0, str(workspace_root))
+        from benchmark.ag3s.experiments.mujoco_source import TransportScene, camera_observation
+        from benchmark.ag3s.experiments.grounding_report import build_robot_model
+        from benchmark.ag3s.trace import RunTrace
+        from benchmark.trajopt.bringup import build_live_pipeline
+
+        trace = RunTrace(args.trace, enabled=bool(args.trace), meta={
+            "prompt": args.prompt, "policy_model": args.model, "remote": args.remote,
+            "ctrl_hz": CTRL_HZ, "open_loop_horizon": OPEN_LOOP_HORIZON,
+            "chunk_period_ms": OPEN_LOOP_HORIZON / CTRL_HZ * 1000.0,
+            "trajopt_links": args.trajopt_links,
+        })
+        constraint_recorder = None
+        if args.record_constraints:
+            from benchmark.ag3s.experiments.constraint_record import ConstraintRecordWriter
+
+            constraint_recorder = ConstraintRecordWriter(
+                args.record_constraints, esdf_mode=args.record_constraints_esdf,
+                meta={"prompt": args.prompt, "trajopt_links": args.trajopt_links},
+            )
+        # AG3S 는 MuJoCo 씬 객체를 통해 카메라를 읽는다. 여기서 만드는 것은 이 프로세스가 이미
+        # 들고 있는 `m`/`d` 를 그대로 가리키는 얇은 뷰이지 두 번째 시뮬레이션이 아니다 —
+        # 두 벌이면 제약이 설명하는 씬과 로봇이 움직이는 씬이 갈라진다.
+        ag3s_scene = TransportScene.attach(m, d)
+        ag3s_robot = build_robot_model(ag3s_scene)
+        ag3s_cameras = tuple(args.trajopt_cameras or ("zed_left", "wrist_cam_l", "wrist_cam_r"))
+        #: 정책 응답이 실어 보내는 attention. 청크마다 갱신된다 (서버 수정 후).
+        policy_attention: dict[str, "np.ndarray"] = {}
+
+        # attention 은 정책 응답에서 온다. 서빙이 아직 그것을 싣지 않으면 None 이고, 그러면
+        # AG3S 는 target 을 못 잡는다(`no_target`). 그 경우 거리장에서 target 복셀을 파내지
+        # 않으므로 제약이 **더 보수적**으로 동작한다 — 안전한 방향의 실패다. 합성 attention 을
+        # 몰래 끼워넣지 않는 이유는, 그러면 이 실행이 실측 파이프라인인 척하게 되기 때문이다.
+        attention_state = {"warned": False}
+
+        def _capture():
+            out = []
+            for camera in ag3s_cameras:
+                amap = policy_attention.get(camera)
+                if amap is None and not attention_state["warned"]:
+                    print("[trajopt] 정책 응답에 attention 이 없다 — target 없이 진행한다 "
+                          "(거리장이 target 을 파내지 않아 더 보수적). 서빙이 선택 셀을 "
+                          "반환하도록 고치면 사라진다")
+                    attention_state["warned"] = True
+                observation, _frame = camera_observation(
+                    ag3s_scene, camera, ag3s_robot, timestamp=time.monotonic(),
+                    attention_map=amap,
+                )
+                out.append(observation)
+            return out
+
+        live_pipeline = build_live_pipeline(
+            mj_model=m, mj_data=d, capture_fn=_capture,
+            state_fn=lambda: ag3s_scene.robot_state(),
+            constraint_links=None if args.trajopt_links == "all" else "arms",
+            trace=trace, recorder=constraint_recorder,
+        )
+        print(f"[trajopt] AG3S+TO on; cameras={ag3s_cameras} links={args.trajopt_links} "
+              f"constraint spheres={live_pipeline.linearizer.n_spheres} "
+              f"chunk budget={OPEN_LOOP_HORIZON / CTRL_HZ * 1000:.0f} ms")
+
     ag3s_recorder = None
     if args.record_ag3s:
         # The benchmark packages live one level above src/, which is REPO_ROOT here.
@@ -892,6 +1017,7 @@ def main():
     def loop_body():
         chunk = None
         chunk_step = 0
+        previous_physical_chunk = None
         # Wall-clock anchor for the next action step; reset after each inference so a
         # slow inference call is not "paid back" by sprinting the following steps.
         next_action_deadline = time.monotonic()
@@ -915,13 +1041,41 @@ def main():
                 else:
                     if seam_remote and t_step == 0:
                         obs["seam_reset"] = True  # tell server-side SEAM to start a fresh episode
-                    result = policy.infer(obs)
+                    if safe_client is not None:
+                        # 서버가 π0.5+SEAM+AG3S+TO 를 다 돌린다. 여기서 받는 것은 청크와
+                        # **안전 판정**이고, 실행 여부는 아래에서 로컬이 정한다.
+                        result = safe_client.infer(obs, reset=(t_step == 0))
+                    else:
+                        result = policy.infer(obs)
                     chunk = np.asarray(result["actions"])
                     seam_timing = result.get("seam_timing", {})
+                    if live_pipeline is not None:
+                        # 서빙이 1단계에서 확정한 (층·헤드·agg·denoise) 셀 하나만 실어 보낸다.
+                        # 전체 텐서가 아니라 카메라당 맵 한 장이라 수십 KB다. 키는 MuJoCo 카메라
+                        # 이름이어야 `_capture` 가 찾는다.
+                        policy_attention.clear()
+                        policy_attention.update(result.get("attention", {}) or {})
                 if mcfg["action_format"] == "rby1":
                     validate_rby1_action_chunk(chunk, log=(t_step == 0))
                 infer_elapsed_ms = (time.time() - t_infer) * 1000.0
                 chunk_step = 0
+
+                if live_pipeline is not None:
+                    # closed loop: TO 가 고친 청크를 **실제로 실행한다**. 실패해도 예외를 내지
+                    # 않고 정책 청크를 그대로 돌려주는 것이 refiner 의 계약이라, 지각 한 프레임이
+                    # 빠져도 제어는 멈추지 않는다.
+                    policy_chunk = chunk
+                    chunk = np.asarray(
+                        live_pipeline.refine(chunk, t_step=t_step,
+                                             previous_chunk=previous_physical_chunk),
+                        dtype=chunk.dtype,
+                    )
+                    previous_physical_chunk = chunk
+                    to_result = live_pipeline.refiner.last_result
+                    if to_result is not None:
+                        print(f"[trajopt] t={t_step} {to_result.status.value} "
+                              f"iters={to_result.iterations} "
+                              f"delta={np.abs(chunk - policy_chunk).max():.4f} rad")
 
                 if ag3s_recorder is not None:
                     ag3s_recorder.record(
@@ -954,7 +1108,16 @@ def main():
                 # sim time is frozen; re-anchor so we resume real-time from here.
                 next_action_deadline = time.monotonic()
 
-            action = np.asarray(chunk[chunk_step], dtype=np.float64)
+            if safe_client is not None and not safe_client.last_safe:
+                # hold: 현재 관절을 그대로 목표로 준다. 정지가 아니라 **유지**다 — 제어를
+                # 끊으면 팔이 중력으로 떨어지고, 그것은 안전 판정이 막으려던 것보다 나쁘다.
+                # 앞 `execution_length` 개만 실행한다는 규칙도 여기서 함께 지켜진다:
+                # 안전하지 않은 청크는 한 스텝도 실행되지 않는다.
+                action = rby1_state()
+                if chunk_step == 0:
+                    print(f"[safe] t={t_step} HOLD — {safe_client.last_reason}")
+            else:
+                action = np.asarray(chunk[chunk_step], dtype=np.float64)
             apply_action(mcfg["action_format"], action, d, idx, act)
 
             obstacle_stopped = False
@@ -1024,6 +1187,10 @@ def main():
                 print("(imageio not installed, saved as PNG sequence)")
         if args.record_inputs:
             save_policy_input_videos(args.record_inputs, input_frame_buffers)
+        if safe_client is not None:
+            safe_client.close()
+        if live_pipeline is not None:
+            live_pipeline.close()
         if ag3s_recorder is not None:
             ag3s_recorder.close()
         if args.trajectory_out and executed_actions:
