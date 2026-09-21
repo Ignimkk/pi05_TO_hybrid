@@ -847,7 +847,7 @@ def main():
         workspace_root = REPO_ROOT.parent
         if str(workspace_root) not in sys.path:
             sys.path.insert(0, str(workspace_root))
-        from benchmark.ag3s.experiments.mujoco_source import TransportScene
+        from benchmark.ag3s.experiments.sources.mujoco_source import TransportScene
         from benchmark.trajopt import wire
         from benchmark.trajopt.client import SafeRemoteClient
 
@@ -871,9 +871,9 @@ def main():
         workspace_root = REPO_ROOT.parent
         if str(workspace_root) not in sys.path:
             sys.path.insert(0, str(workspace_root))
-        from benchmark.ag3s.experiments.mujoco_source import TransportScene, camera_observation
-        from benchmark.ag3s.experiments.grounding_report import build_robot_model
-        from benchmark.ag3s.trace import RunTrace
+        from benchmark.ag3s.experiments.sources.mujoco_source import TransportScene, camera_observation
+        from benchmark.ag3s.experiments.reports.grounding_report import build_robot_model
+        from benchmark.ag3s.runtime.trace import RunTrace
         from benchmark.trajopt.bringup import build_live_pipeline
 
         trace = RunTrace(args.trace, enabled=bool(args.trace), meta={
@@ -884,7 +884,7 @@ def main():
         })
         constraint_recorder = None
         if args.record_constraints:
-            from benchmark.ag3s.experiments.constraint_record import ConstraintRecordWriter
+            from benchmark.ag3s.experiments.sources.constraint_record import ConstraintRecordWriter
 
             constraint_recorder = ConstraintRecordWriter(
                 args.record_constraints, esdf_mode=args.record_constraints_esdf,
@@ -937,7 +937,7 @@ def main():
         workspace_root = REPO_ROOT.parent
         if str(workspace_root) not in sys.path:
             sys.path.insert(0, str(workspace_root))
-        from benchmark.ag3s.experiments.policy_record import PolicyRecordWriter
+        from benchmark.ag3s.experiments.sources.policy_record import PolicyRecordWriter
         depth_cameras = ()
         if args.record_depth is not None:
             depth_cameras = tuple(args.record_depth) or (

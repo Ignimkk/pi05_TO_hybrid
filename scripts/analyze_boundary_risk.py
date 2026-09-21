@@ -218,7 +218,7 @@ def self_pairs(link_names: tuple[str, ...]) -> tuple[np.ndarray, np.ndarray]:
 
 
 def build_robot() -> UrdfSphereChain:
-    from benchmark.ag3s.experiments.mujoco_source import gap_filling_capsules
+    from benchmark.ag3s.experiments.sources.mujoco_source import gap_filling_capsules
     import mujoco
 
     model = mujoco.MjModel.from_xml_path(str(MODEL_XML.resolve()))
