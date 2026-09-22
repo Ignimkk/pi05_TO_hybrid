@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "max_sampling_attempts": 100,
+  "settle_seconds": 1.5,
+  "min_object_clearance_m": 0.075,
+  "max_settle_speed_mps": 0.03,
+  "max_ik_position_error_m": 0.015,
+  "ready_configuration": {
+    "left_arm_joint_offsets_deg": [0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "right_arm_joint_offsets_deg": [0.0, -5.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  },
+  "target_position": {
+    "enabled": true,
+    "jitter_xy_m": [0.02, 0.03]
+  },
+  "goal_position": {
+    "enabled": true,
+    "jitter_xy_m": [0.03, 0.03]
+  },
+  "target_orientation": {
+    "enabled": true,
+    "yaw_range_deg": [-45.0, 45.0]
+  },
+  "robot_initial_configuration": {
+    "enabled": true,
+    "joint_noise_deg": [-2.0, 2.0]
+  },
+  "language_instruction": {
+    "enabled": true,
+    "templates": [
+      "Put the {target} in the basket.",
+      "Place the {target} into the basket.",
+      "Pick up the {target} and place it in the basket."
+    ]
+  }
+}

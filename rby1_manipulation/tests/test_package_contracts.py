@@ -99,7 +99,7 @@ class PackageContractsTest(unittest.TestCase):
 
     def test_banana_grasp_height_has_table_clearance_floor(self) -> None:
         model = mujoco.MjModel.from_xml_path(str(TRANSPORT_MODEL_XML))
-        self.assertAlmostEqual(object_grasp_dz(model, "banana"), 0.022)
+        self.assertAlmostEqual(object_grasp_dz(model, "banana"), 0.030)
         self.assertAlmostEqual(object_grasp_dz(model, "pear"), 0.015)
 
     def test_episode_1000_uses_second_chunk(self) -> None:

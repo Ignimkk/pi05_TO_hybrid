@@ -20,6 +20,7 @@ Two rules encoded below, both learned the hard way:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Optional, Sequence
 
 import mink
@@ -53,7 +54,7 @@ OBJECT_RELEASE_DZ = 0.03
 # The banana is low and curved: its mesh-derived 60% height (about 13 mm)
 # places the long fingertips through the tabletop. This floor keeps the finger
 # tips clear while still pinching below the banana's crown.
-OBJECT_GRASP_DZ_MIN = {"banana": 0.022}
+OBJECT_GRASP_DZ_MIN = {"banana": 0.030}
 # A mesh-height fraction puts the pear grasp about 26 mm above its centre, on
 # the narrow neck. The pads initially touch but lose it as soon as the arm
 # lifts. Grasp the wider body instead; the tall pear still leaves ample table
@@ -72,6 +73,26 @@ def capture_grasp_frames(model, data) -> GraspFrames:
     return GraspFrames(
         right=site_pose(data, model, "right_ee").rotation(),
         left=site_pose(data, model, "left_ee").rotation(),
+    )
+
+
+def capture_object_grasp_frames(model, data, object_body: str) -> GraspFrames:
+    """Rotate the live grasp frames with the target object's world yaw.
+
+    Identity-oriented objects retain the historical wrist frames. For elongated
+    objects, especially the banana, rotating both frames about world Z preserves
+    the demonstrated relationship between the finger closing direction and the
+    object's long axis.
+    """
+    frames = capture_grasp_frames(model, data)
+    rotation = body_rotation(model, data, object_body)
+    yaw = math.atan2(float(rotation[1, 0]), float(rotation[0, 0]))
+    world_yaw = mink.SO3(np.array([
+        math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)
+    ]))
+    return GraspFrames(
+        right=world_yaw @ frames.right,
+        left=world_yaw @ frames.left,
     )
 
 

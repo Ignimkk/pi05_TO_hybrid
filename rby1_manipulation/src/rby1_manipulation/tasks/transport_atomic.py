@@ -10,7 +10,7 @@ import argparse
 import json
 import os
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import IntEnum
 from pathlib import Path
 from typing import Callable, Sequence
@@ -48,6 +48,7 @@ from rby1_manipulation.evaluation.transport import check_grasp, object_in_crate
 from rby1_manipulation.planning.transport import (
     arm_retract_waypoint,
     capture_grasp_frames,
+    capture_object_grasp_frames,
     crate_approach_waypoints,
     crate_lift_waypoints,
     object_into_crate_waypoints,
@@ -74,10 +75,17 @@ from rby1_manipulation.simulation.transport_scene import (
     base_handles,
     body_position,
     build_action_14,
+    build_action_16,
     build_state_14,
+    build_state_16,
     free_body_pose,
     load_layout_config,
     site_position,
+)
+from rby1_manipulation.simulation.randomized_pick_place import (
+    load_randomization_config,
+    randomization_config_fingerprint,
+    sample_valid_scene,
 )
 from rby1_manipulation.tasks.transport_pack_lift import (
     ARM_REST_SETTLE_TIMEOUT_SECS,
@@ -150,6 +158,7 @@ INITIAL_HOLD_SECS = 1.0
 TARGET_SETTLE_SECS = 1.5
 TERMINAL_HOLD_SECS = 2.0
 ATOMIC_SCHEMA_VERSION = 2
+RANDOMIZED_SCHEMA_VERSION = 1
 NON_TARGET_DISPLACEMENT_TOLERANCE_M = 0.020
 TARGET_LINEAR_SPEED_TOLERANCE_MPS = 0.030
 RETREAT_TARGET_CLEARANCE_M = 0.100
@@ -264,6 +273,55 @@ def _check_dataset_schema(root: Path) -> None:
         )
 
 
+def _check_randomized_dataset_schema(root: Path, *, config_fingerprint: str) -> None:
+    schema_path = root / "meta" / "randomized_schema.json"
+    episodes_path = root / "meta" / "episodes.jsonl"
+    if not schema_path.exists():
+        if episodes_path.exists():
+            raise RuntimeError(
+                f"{root} already has episodes but no randomized schema; use a new dataset root"
+            )
+        return
+    value = json.loads(schema_path.read_text(encoding="utf-8"))
+    if int(value.get("version", -1)) != RANDOMIZED_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"{root} uses randomized schema v{value.get('version')}; expected "
+            f"v{RANDOMIZED_SCHEMA_VERSION}"
+        )
+    if value.get("randomization_config_fingerprint") != config_fingerprint:
+        raise RuntimeError(
+            f"{root} uses a different randomization config fingerprint; "
+            "use a new dataset root"
+        )
+
+
+def _write_randomized_schema(root: Path, *, config_fingerprint: str) -> None:
+    path = root / "meta" / "randomized_schema.json"
+    value = {
+        "version": RANDOMIZED_SCHEMA_VERSION,
+        "state_action_schema": "rby1_16",
+        "state_action_names": (
+            [f"left_arm_{index}" for index in range(7)] + ["left_gripper"]
+            + [f"right_arm_{index}" for index in range(7)] + ["right_gripper"]
+        ),
+        "cameras": ["cam_high", "cam_left_wrist", "cam_right_wrist"],
+        "container_semantic": "basket",
+        "internal_container_body": CRATE_BODY,
+        "randomization_config_fingerprint": config_fingerprint,
+        "excluded_randomization": [
+            "lighting", "texture", "camera_calibration", "camera_extrinsics",
+            "friction", "mass", "damping",
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing != value:
+            raise RuntimeError("randomized dataset schema/config fingerprint mismatch")
+        return
+    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
+
 def _free_body_speed(model: mujoco.MjModel, data: mujoco.MjData, joint_name: str) -> float:
     joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
     dof = int(model.jnt_dofadr[joint_id])
@@ -305,6 +363,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--layout-index", type=int, default=0)
     parser.add_argument("--fruit-grid", default=str(DEFAULT_FRUIT_GRID_CONFIG))
     parser.add_argument("--config", default=None)
+    parser.add_argument("--randomization-config", default=None)
+    parser.add_argument("--schema", choices=("rby1_14", "rby1_16"), default="rby1_14")
     parser.add_argument("--task-prompt", default=None)
     parser.add_argument("--canonical-prompt", default=None)
     parser.add_argument("--is-paraphrase", action="store_true")
@@ -354,8 +414,24 @@ def main() -> int:
         raise SystemExit("initial and terminal hold must both be at least 1.0 second")
     if args.speed_scale <= 0.0:
         raise SystemExit("--speed-scale must be positive")
+    if args.randomization_config and args.task != "place_one":
+        raise SystemExit("--randomization-config currently supports only place_one")
+    if args.randomization_config and args.schema != "rby1_16":
+        raise SystemExit("randomized pick-place collection requires --schema rby1_16")
+    if args.randomization_config and args.random_scene:
+        raise SystemExit("--random-scene cannot be combined with --randomization-config")
+    randomized_config = (
+        load_randomization_config(args.randomization_config)
+        if args.randomization_config else None
+    )
     if args.log_dataset:
-        _check_dataset_schema(Path(args.log_dataset))
+        if randomized_config is not None:
+            _check_randomized_dataset_schema(
+                Path(args.log_dataset),
+                config_fingerprint=randomization_config_fingerprint(randomized_config),
+            )
+        else:
+            _check_dataset_schema(Path(args.log_dataset))
 
     prompt_canonical = args.canonical_prompt or canonical_prompt(args.task, target)
     prompt = args.task_prompt or prompt_canonical
@@ -374,18 +450,49 @@ def main() -> int:
     model = mujoco.MjModel.from_xml_path(MODEL_XML)
     data = mujoco.MjData(model)
     render_near_plane_m = float(model.stat.extent * model.vis.map.znear)
-    reset_fruit_grid_scene(
-        model,
-        data,
-        layout,
-        grid,
-        layout_index=args.layout_index,
-        slot_order=slot_order,
-        preloaded_objects=preloaded,
-        rng=rng,
-        randomize=randomization,
-        position_jitter_xy=args.fruit_jitter if args.random_scene else 0.0,
-    )
+    randomized_scene = None
+    if randomized_config is not None:
+        try:
+            randomized_scene = sample_valid_scene(
+                model,
+                data,
+                layout,
+                grid,
+                randomized_config,
+                target=target,
+                layout_index=args.layout_index,
+                slot_order=slot_order,
+                rng=rng,
+            )
+        except RuntimeError as error:
+            # The outer collector consumes these markers and records the failed
+            # seed without ever creating a partial LeRobot episode.
+            failure = {
+                "valid": False,
+                "target_fruit": target,
+                "layout_index": args.layout_index,
+                "slot_order": list(slot_order),
+                "seed": args.seed,
+                "error": str(error),
+            }
+            print(f">>> RANDOMIZED_SCENE = {json.dumps(failure, sort_keys=True)}")
+            print(">>> SUCCESS = False")
+            print(">>> FAILURE_REASON = scene_sampling_exhausted")
+            return 1
+        print(f">>> RANDOMIZED_SCENE = {json.dumps(randomized_scene.to_dict(), sort_keys=True)}")
+    else:
+        reset_fruit_grid_scene(
+            model,
+            data,
+            layout,
+            grid,
+            layout_index=args.layout_index,
+            slot_order=slot_order,
+            preloaded_objects=preloaded,
+            rng=rng,
+            randomize=randomization,
+            position_jitter_xy=args.fruit_jitter if args.random_scene else 0.0,
+        )
 
     right, left = right_arm_handles(model), left_arm_handles(model)
     arms = {"right": right, "left": left}
@@ -405,17 +512,19 @@ def main() -> int:
     tracker = PhaseTracker()
     recorder: EpisodeRecorder | None = None
     if args.record or args.log_dataset:
+        state_fn = build_state_16 if args.schema == "rby1_16" else build_state_14
+        action_fn = build_action_16 if args.schema == "rby1_16" else build_action_14
         recorder = EpisodeRecorder(
             model,
             data,
-            state_fn=lambda: build_state_14(data, left, right),
-            action_fn=lambda: build_action_14(data, left, right),
+            state_fn=lambda: state_fn(data, left, right),
+            action_fn=lambda: action_fn(data, left, right),
             cam_name_map=CAM_NAME_MAP,
             task=prompt,
             record_path=args.record,
             dataset_root=args.log_dataset,
             fps=args.log_fps,
-            schema="rby1_14",
+            schema=args.schema,
             defer_policy_rendering=bool(args.log_dataset),
             model_xml_path=MODEL_XML,
             phase_fn=lambda: int(tracker.phase),
@@ -611,7 +720,11 @@ def main() -> int:
         arm_side = pick_arm_for_block(body_position(model, data, object_body))
         active_arm_side = arm_side
         arm = arms[arm_side]
-        frames = capture_grasp_frames(model, data)
+        frames = (
+            capture_object_grasp_frames(model, data, object_body)
+            if randomized_scene is not None
+            else capture_grasp_frames(model, data)
+        )
         grasp_attempts = 0
         grasp_retries = 0
 
@@ -898,7 +1011,10 @@ def main() -> int:
     if dataset_episode_index is not None and args.log_dataset:
         final_poses = _pose_dict(model, data)
         metadata = {
-            "schema_version": ATOMIC_SCHEMA_VERSION,
+            "schema_version": (
+                RANDOMIZED_SCHEMA_VERSION if randomized_scene is not None
+                else ATOMIC_SCHEMA_VERSION
+            ),
             "episode_index": dataset_episode_index,
             "plan_index": args.plan_index,
             "split": args.split,
@@ -941,17 +1057,38 @@ def main() -> int:
             ),
             "episode_length": len(recorder.episode) if recorder.episode is not None else 0,
             "fps": args.log_fps,
-            "state_dim": 14,
-            "action_dim": 14,
+            "state_dim": 16 if args.schema == "rby1_16" else 14,
+            "action_dim": 16 if args.schema == "rby1_16" else 14,
             "success": success,
             "failure_reason": failure_reason,
             "validation": checks,
             "seed": args.seed,
         }
         root = Path(args.log_dataset)
-        _write_atomic_schema(root)
-        _append_jsonl(root / "meta" / "atomic_episodes.jsonl", metadata)
-        print(f">>> ATOMIC_METADATA_EPISODE = {dataset_episode_index}")
+        if randomized_scene is not None:
+            assert randomized_config is not None
+            config_fingerprint = randomization_config_fingerprint(randomized_config)
+            metadata.update({
+                "task_id": f"place_{target}_in_basket",
+                "randomized_scene": randomized_scene.to_dict(),
+                "randomization": asdict(randomized_config),
+                "randomization_config_fingerprint": config_fingerprint,
+                "initial_robot_state": randomized_scene.initial_robot_state.round(8).tolist(),
+                "initial_arm_joint_qpos": randomized_scene.initial_arm_joint_qpos,
+                "requested_target_pose": randomized_scene.requested_target_pose.round(8).tolist(),
+                "settled_target_pose": randomized_scene.settled_target_pose.round(8).tolist(),
+                "requested_goal_pose": randomized_scene.requested_goal_pose.round(8).tolist(),
+                "settled_goal_pose": randomized_scene.settled_goal_pose.round(8).tolist(),
+                "sampling_attempts": randomized_scene.sampling_attempts,
+                "scene_validity": randomized_scene.validity,
+            })
+            _write_randomized_schema(root, config_fingerprint=config_fingerprint)
+            _append_jsonl(root / "meta" / "randomized_episodes.jsonl", metadata)
+            print(f">>> RANDOMIZED_METADATA_EPISODE = {dataset_episode_index}")
+        else:
+            _write_atomic_schema(root)
+            _append_jsonl(root / "meta" / "atomic_episodes.jsonl", metadata)
+            print(f">>> ATOMIC_METADATA_EPISODE = {dataset_episode_index}")
     return 0 if success else 1
 
 

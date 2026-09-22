@@ -18,6 +18,7 @@ BLOCK_FALSE_GRID_CONFIG = CONFIG_DIR / "grids" / "block_false_grid.json"
 FRUIT_GRID_CONFIG = CONFIG_DIR / "grids" / "fruit_grid.json"
 TRANSPORT_LAYOUT_CONFIG = CONFIG_DIR / "transport_layout.json"
 PICK_PLACE_OBSTACLE_CONFIG = CONFIG_DIR / "pick_place_obstacles.json"
+RANDOMIZED_PICK_PLACE_CONFIG = CONFIG_DIR / "randomized_pick_place.json"
 
 
 def _description_root() -> Path:

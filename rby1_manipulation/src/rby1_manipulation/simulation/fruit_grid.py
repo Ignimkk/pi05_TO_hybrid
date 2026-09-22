@@ -209,6 +209,9 @@ def reset_fruit_grid_scene(
     settle_seconds: float = 1.5,
     position_jitter_xy: float = 0.0,
     basket_clearance_offset: float = 0.0,
+    object_position_overrides: Mapping[str, Sequence[float]] | None = None,
+    object_yaw_overrides: Mapping[str, float] | None = None,
+    initial_joint_qpos: Mapping[str, float] | None = None,
 ) -> FruitScene:
     """Reset, place four fruits on the grid/in crate, settle, and report poses."""
     order = tuple(slot_order)
@@ -239,6 +242,16 @@ def reset_fruit_grid_scene(
         layout_index=layout_index,
         slot_order=order,
     )
+    for fruit, value in (object_position_overrides or {}).items():
+        if fruit not in OBJECT_TYPES:
+            raise ValueError(f"unknown object position override {fruit!r}")
+        position = np.asarray(value, dtype=float)
+        if position.shape == (2,):
+            requested[fruit][:2] = position
+        elif position.shape == (3,):
+            requested[fruit] = position.copy()
+        else:
+            raise ValueError(f"position override for {fruit} must be [x, y] or [x, y, z]")
     if position_jitter_xy:
         placed: list[np.ndarray] = []
         for fruit in order:
@@ -280,9 +293,28 @@ def reset_fruit_grid_scene(
         local_z = float(layout_config["objects"][fruit]["spawn_z"]) - nominal_crate_z
         requested[fruit] = crate_pos + crate_rot @ np.array([*local_xy, local_z])
 
+    yaw_overrides = dict(object_yaw_overrides or {})
+    unknown_yaws = set(yaw_overrides) - set(OBJECT_TYPES)
+    if unknown_yaws:
+        raise ValueError(f"unknown object yaw overrides: {sorted(unknown_yaws)}")
     for fruit in OBJECT_TYPES:
-        quat = tuple(crate_pose[3:7]) if fruit in preloaded else (1.0, 0.0, 0.0, 0.0)
+        if fruit in preloaded:
+            quat = tuple(crate_pose[3:7])
+        else:
+            yaw = float(yaw_overrides.get(fruit, 0.0))
+            quat = (float(np.cos(yaw / 2.0)), 0.0, 0.0, float(np.sin(yaw / 2.0)))
         set_block_pose(model, data, OBJECT_JOINTS[fruit], requested[fruit], quat)
+
+    for joint_name, value in (initial_joint_qpos or {}).items():
+        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+        if joint_id < 0:
+            raise ValueError(f"unknown initial joint {joint_name!r}")
+        if model.jnt_type[joint_id] not in (
+            mujoco.mjtJoint.mjJNT_HINGE,
+            mujoco.mjtJoint.mjJNT_SLIDE,
+        ):
+            raise ValueError(f"initial joint override {joint_name!r} is not scalar")
+        data.qpos[int(model.jnt_qposadr[joint_id])] = float(value)
 
     mujoco.mj_forward(model, data)
     for actuator_id in range(model.nu):

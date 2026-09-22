@@ -15,6 +15,7 @@ dependencies = [
   "mujoco",
   "numpy",
   "opencv-python",
+  "Pillow",
   "pyarrow",
   "scipy>=1.9",
 ]
@@ -32,6 +33,10 @@ rby1-collect-transport-dataset = "rby1_manipulation.data.collect_transport_datas
 rby1-collect-atomic-transport-dataset = "rby1_manipulation.data.collect_atomic_transport_dataset:main"
 rby1-validate-atomic-dataset = "rby1_manipulation.data.validate_atomic_dataset:main"
 rby1-finalize-atomic-dataset = "rby1_manipulation.data.finalize_atomic_dataset:main"
+rby1-preflight-randomized-pick-place = "rby1_manipulation.data.preflight_randomized_pick_place:main"
+rby1-collect-randomized-pick-place = "rby1_manipulation.data.collect_randomized_pick_place_dataset:main"
+rby1-validate-randomized-pick-place = "rby1_manipulation.data.validate_randomized_pick_place_dataset:main"
+rby1-reindex-randomized-pick-place = "rby1_manipulation.data.reindex_randomized_pick_place_dataset:main"
 rby1-evaluate-atomic-rollouts = "rby1_manipulation.evaluation.atomic_transport:main"
 rby1-follow-mocap = "rby1_manipulation.tools.follow_mocap:main"
 rby1-preview-block-grid = "rby1_manipulation.tools.preview_block_grid:main"

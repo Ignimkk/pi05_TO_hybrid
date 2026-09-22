@@ -1,11 +1,11 @@
 """LeRobot-style episode logger for the dual-arm ALOHA schema.
 
 Per-frame observation collected during scripted rollouts:
-    observation.state           : (14,) [L 6 joint, L gripper, R 6 joint, R gripper]
+    observation.state           : selected writer schema (14-D, 16-D, or 17-D)
     observation.images.cam_high        : zed_left    RGB (H, W, 3) uint8
     observation.images.cam_left_wrist  : wrist_cam_l RGB (H, W, 3) uint8
     observation.images.cam_right_wrist : wrist_cam_r RGB (H, W, 3) uint8
-    action                      : (14,) same layout as state, but the *commanded*
+    action                      : same layout as state, but the *commanded*
                                   next joint position (i.e. data.ctrl at the time
                                   the frame was captured)
     timestamp                   : seconds since episode start
@@ -44,17 +44,25 @@ CAMERAS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 CHUNK_SIZE = 1000  # episodes per chunk directory (LeRobot default)
 
 # Schema registry. "rby1_14" is the original fixed-arm layout and stays the
-# default, so every existing caller writes byte-identical datasets. The mobile
-# scenarios opt into "rby1_17_mobile", whose first 14 entries are the same
-# quantities in the same order, with the planar base pose appended.
+# default, so every existing caller writes byte-identical datasets. Randomized
+# pick-place opts into full-arm ``rby1_16``; mobile scenarios opt into
+# ``rby1_17_mobile``, whose first 14 entries retain the legacy quantities and
+# append the planar base pose.
 _ARM14 = [
     "left_arm_0", "left_arm_1", "left_arm_2", "left_arm_3", "left_arm_4", "left_arm_5",
     "left_gripper",
     "right_arm_0", "right_arm_1", "right_arm_2", "right_arm_3", "right_arm_4", "right_arm_5",
     "right_gripper",
 ]
+_ARM16 = [
+    "left_arm_0", "left_arm_1", "left_arm_2", "left_arm_3", "left_arm_4", "left_arm_5",
+    "left_arm_6", "left_gripper",
+    "right_arm_0", "right_arm_1", "right_arm_2", "right_arm_3", "right_arm_4", "right_arm_5",
+    "right_arm_6", "right_gripper",
+]
 SCHEMAS = {
     "rby1_14": {"dim": 14, "names": _ARM14, "robot_type": "rby1"},
+    "rby1_16": {"dim": 16, "names": _ARM16, "robot_type": "rby1"},
     "rby1_17_mobile": {"dim": 17,
                        "names": _ARM14 + ["base_x", "base_y", "base_yaw"],
                        "robot_type": "rby1_mobile"},
@@ -64,7 +72,7 @@ DEFAULT_SCHEMA = "rby1_14"
 
 @dataclass
 class Frame:
-    state: np.ndarray                      # (14,) or (17,) float32, per writer schema
+    state: np.ndarray                      # (14,), (16,), or (17,) float32, per writer schema
     action: np.ndarray                     # same shape as state
     images: Dict[str, np.ndarray]          # cam name -> HxWx3 uint8
     timestamp: float
