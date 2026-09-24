@@ -48,7 +48,11 @@ from rby1_manipulation.simulation.pick_place_obstacles import (
     PickPlaceObstacleManager,
     load_pick_place_obstacle_config,
 )
-from rby1_manipulation.simulation.transport_scene import load_layout_config
+from rby1_manipulation.simulation.transport_scene import (
+    CRATE_JOINT,
+    OBJECT_JOINTS,
+    load_layout_config,
+)
 
 MODELS = {
     "droid": {
@@ -84,6 +88,20 @@ MODELS = {
         "obs_format": "rby1",
         "action_format": "rby1",        # 14 = [L 6 abs joint, L grip, R 6 abs joint, R grip]
     },
+    "rby1_randomized_pick_place_16d": {
+        # LoRA fine-tune on local/rby1_randomized_pick_place_16d_v1 (2000 episodes,
+        # 0-1599 trained; 1600-1799 validation; 1800-1999 test -- all held out).
+        # 16-D schema keeps arm_6, unlike every 14-D model above.
+        "config": "pi05_rby1_randomized_pick_place_16d_lora",
+        "checkpoint": (
+            "/mnt/dev/work/pi05_TO_hybrid/checkpoints/"
+            "pi05_rby1_randomized_pick_place_16d_lora/"
+            "rby1_randomized_pick_place_16d_30k_xla_retry_20260923/29999"
+        ),
+        "obs_format": "rby1_16d",
+        "action_format": "rby1_16d",   # 16 = [L 7 abs joint, L grip, R 7 abs joint, R grip]
+        "model_xml": MODEL_XML_TRANSPORT,
+    },
     "rby1_transport_14d": {
         "config": "pi05_rby1_lora",
         "checkpoint": None,
@@ -107,6 +125,12 @@ GRIPPER_OPEN, GRIPPER_CLOSED = -0.05, 0.0
 # rby1_manipulation/ik_utils.py GRIPPER_OPEN=-0.045); must match for correct
 # state/action normalization on the "rby1" model.
 RBY1_GRIPPER_OPEN = -0.045
+
+DEFAULT_PROMPT = "put the red block in the brown box with your right hand"
+
+RANDOMIZED_16D_DATASET = pathlib.Path(
+    "/mnt/dev/work/pi05_TO_hybrid/data/rby1_randomized_pick_place_16d_v1"
+)
 
 CTRL_HZ = 15
 OPEN_LOOP_HORIZON = 8
@@ -198,6 +222,96 @@ def save_policy_input_videos(output_dir, frame_buffers):
         print(f"(imageio not installed, saved {camera_name} as a PNG sequence)")
 
 
+def load_randomized_episode(episode_index):
+    """Read one recorded scene description from the 16-D dataset metadata."""
+    path = RANDOMIZED_16D_DATASET / "meta" / "randomized_episodes.jsonl"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found; --model rby1_randomized_pick_place_16d needs the "
+            "dataset metadata to reconstruct a scene"
+        )
+    with path.open() as handle:
+        for line in handle:
+            record = json.loads(line)
+            if record["episode_index"] == episode_index:
+                return record
+    raise ValueError(f"episode_index {episode_index} not present in {path}")
+
+
+def randomized_split_of(episode_index):
+    """Which split an episode belongs to; 'train' means the model memorised it."""
+    path = RANDOMIZED_16D_DATASET / "meta" / "randomized_splits.json"
+    if not path.exists():
+        return None
+    splits = json.loads(path.read_text())["splits"]
+    for name, span in splits.items():
+        if span["start_episode_index"] <= episode_index < span["end_episode_index_exclusive"]:
+            return name
+    return None
+
+
+def reset_randomized_scene(m, d, record, settle_seconds=1.5):
+    """Restore the exact initial state the recorded episode started from.
+
+    Sets arm joints, opens both grippers, and places every fruit plus the basket
+    at its recorded free-joint pose, then lets the scene settle. This replays a
+    scene rather than sampling a new one, so an evaluation is reproducible and can
+    be pinned to a held-out episode.
+    """
+    key = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "teleop")
+    if key >= 0:
+        mujoco.mj_resetDataKeyframe(m, d, key)
+
+    def joint_qposadr(name):
+        joint_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, name)
+        if joint_id < 0:
+            raise ValueError(f"joint {name!r} missing from the loaded MuJoCo model")
+        return int(m.jnt_qposadr[joint_id])
+
+    def actuator_id(name):
+        actuator = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+        if actuator < 0:
+            raise ValueError(f"actuator {name!r} missing from the loaded MuJoCo model")
+        return int(actuator)
+
+    # Arms: qpos and the matching ctrl target, so the position actuators hold the
+    # pose instead of dragging it back to the keyframe.
+    for joint_name, value in record["initial_arm_joint_qpos"].items():
+        d.qpos[joint_qposadr(joint_name)] = float(value)
+    for joints, actuators in ((LEFT_ARM_JOINTS, LEFT_ARM_ACTS),
+                              (RIGHT_ARM_JOINTS, RIGHT_ARM_ACTS)):
+        for joint_name, actuator_name in zip(joints, actuators):
+            d.ctrl[actuator_id(actuator_name)] = float(
+                record["initial_arm_joint_qpos"][joint_name]
+            )
+
+    # Grippers open, at the exact ctrl value the dataset was collected with.
+    for joint_name, actuator_name in ((GRIPPER_L_JOINT, GRIPPER_L_ACT),
+                                      (GRIPPER_R_JOINT, GRIPPER_R_ACT)):
+        d.qpos[joint_qposadr(joint_name)] = RBY1_GRIPPER_OPEN
+        d.ctrl[actuator_id(actuator_name)] = RBY1_GRIPPER_OPEN
+
+    # Free bodies: 7-value [x y z qw qx qy qz] per free joint.
+    free_poses = {
+        OBJECT_JOINTS[fruit]: pose
+        for fruit, pose in record["initial_fruit_poses"].items()
+    }
+    free_poses[CRATE_JOINT] = record["basket_pose"]
+    for joint_name, pose in free_poses.items():
+        pose = np.asarray(pose, dtype=np.float64)
+        if pose.shape != (7,):
+            raise ValueError(f"{joint_name} pose must have 7 values, got {pose.shape}")
+        adr = joint_qposadr(joint_name)
+        d.qpos[adr:adr + 7] = pose
+
+    d.qvel[:] = 0.0
+    d.qacc[:] = 0.0
+    mujoco.mj_forward(m, d)
+    for _ in range(int(settle_seconds / m.opt.timestep)):
+        mujoco.mj_step(m, d)
+    return record
+
+
 def build_obs(obs_format, m, d, renderer, idx, prompt):
     """Assemble the observation dict expected by the chosen policy transform.
 
@@ -246,6 +360,39 @@ def build_obs(obs_format, m, d, renderer, idx, prompt):
             right_joint_pos[:6],
             [right_grip_norm],
         ]).astype(np.float64)
+
+        return {
+            "state": state,
+            "images": {
+                "cam_high":        _hwc_to_chw(base_img),
+                "cam_left_wrist":  _hwc_to_chw(wrist_l_img),
+                "cam_right_wrist": _hwc_to_chw(wrist_r_img),
+            },
+            "prompt": prompt,
+        }
+
+    if obs_format == "rby1_16d":
+        # 16-D schema: every arm joint including arm_6, which the 14-D models drop.
+        # Mirrors build_state_16() in rby1_manipulation.simulation.transport_scene,
+        # which is what recorded observation.state during data collection.
+        base_img = render_cam(m, d, renderer, "zed_left", match_rby1_dataset=True)
+        wrist_l_img = render_cam(m, d, renderer, "wrist_cam_l", match_rby1_dataset=True)
+        wrist_r_img = render_cam(m, d, renderer, "wrist_cam_r", match_rby1_dataset=True)
+
+        left_joint_pos = np.array([d.qpos[i] for i in idx["left_q"]], dtype=np.float64)
+        right_joint_pos = np.array([d.qpos[i] for i in idx["right_q"]], dtype=np.float64)
+        left_grip_norm = float(abs(d.qpos[idx["left_grip_q"]]) / abs(RBY1_GRIPPER_OPEN))
+        right_grip_norm = float(abs(d.qpos[idx["right_grip_q"]]) / abs(RBY1_GRIPPER_OPEN))
+
+        # [left arm_0..arm_6, left gripper, right arm_0..arm_6, right gripper]
+        state = np.concatenate([
+            left_joint_pos,
+            [left_grip_norm],
+            right_joint_pos,
+            [right_grip_norm],
+        ]).astype(np.float64)
+        if state.shape != (16,):
+            raise ValueError(f"rby1_16d state must be (16,), got {state.shape}")
 
         return {
             "state": state,
@@ -332,6 +479,28 @@ def apply_action(action_format, action, d, idx, act):
             d.ctrl[act["right_a"][i]] = d.qpos[idx["right_q"][i]] + right_delta[i]
         d.ctrl[act["left_grip_a"]]  = GRIPPER_OPEN * (1.0 - left_grip)
         d.ctrl[act["right_grip_a"]] = GRIPPER_OPEN * (1.0 - right_grip)
+        return
+
+    if action_format == "rby1_16d":
+        # (16,) = [L 7 abs joint targets, L grip, R 7 abs joint targets, R grip].
+        # Like "rby1" these are absolute targets -- the server's AbsoluteActions
+        # transform already undid the model's internal delta-joint prediction.
+        # Unlike "rby1", arm_6 IS predicted, so nothing is held at a stale keyframe.
+        if len(action) < 16:
+            raise ValueError(
+                f"rby1_16d expects a 16-D action, got {len(action)}. A 14-D policy "
+                "server will silently zero-pad instead of failing -- check --remote."
+            )
+        left_targets = action[0:7]
+        left_grip = float(np.clip(action[7], 0.0, 1.0))
+        right_targets = action[8:15]
+        right_grip = float(np.clip(action[15], 0.0, 1.0))
+
+        for i in range(7):
+            d.ctrl[act["left_a"][i]] = left_targets[i]
+            d.ctrl[act["right_a"][i]] = right_targets[i]
+        d.ctrl[act["left_grip_a"]] = left_grip * RBY1_GRIPPER_OPEN
+        d.ctrl[act["right_grip_a"]] = right_grip * RBY1_GRIPPER_OPEN
         return
 
     if action_format == "rby1":
@@ -472,9 +641,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=list(MODELS.keys()), default="droid",
                     help="which pi0.5 variant to load")
-    ap.add_argument("--prompt", default="put the red block in the brown box with your right hand",
+    ap.add_argument("--prompt", default=DEFAULT_PROMPT,
                     help="for --model rby1, use one of the 6 exact task strings the model "
                          "was fine-tuned on (see rby1_dataset_v1/meta/tasks.jsonl)")
+    ap.add_argument(
+        "--episode-index", type=int, default=1800,
+        help="for --model rby1_randomized_pick_place_16d: replay this recorded "
+             "episode's initial scene. 0-1599 were trained on; 1600-1799 are "
+             "validation and 1800-1999 test, so the default is the first held-out "
+             "test scene. The episode's own prompt is used unless --prompt is given.")
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--headless", action="store_true")
     ap.add_argument(
@@ -588,6 +763,23 @@ def main():
         help="move non-preloaded fruits this many metres radially away from the basket "
              "during a fruit-grid reset (inference-only; requires --fruit-layout-index)",
     )
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="씬을 결정론적으로 정한다. seed 하나로 fruit layout(2~15) · slot order · "
+             "과일 xy jitter(+-12 mm)가 파생된다. **난도는 정하지 않는다** — obstacle "
+             "profile 은 --obstacle-profile 로 명시한다 (2026-09-22 판정). crate/shelf/"
+             "friction/mass 는 건드리지 않는다: 정책의 파지 성공률이 함께 흔들리면 실패를 "
+             "지각 탓인지 정책 탓인지 귀속할 수 없다",
+    )
+    ap.add_argument(
+        "--record-frames",
+        default=None,
+        metavar="DIR",
+        help="manifest.json + frames.jsonl + completeness.json 을 여기 쓴다. "
+             "observation / planning / control 프레임마다 한 줄 (T0 의 요구)",
+    )
     args = ap.parse_args()
 
     if args.start_delay < 0:
@@ -611,6 +803,30 @@ def main():
         )
     if args.fruit_slot_order is not None and len(set(args.fruit_slot_order)) != 4:
         ap.error("--fruit-slot-order must contain each fruit exactly once")
+    # --seed 는 layout 과 slot order 를 **파생**시킨다. 둘을 함께 주면 어느 것이 이겼는지
+    # 기록만 보고 알 수 없으므로 거절한다 — 조용히 한쪽을 무시하면 재현이 깨진다.
+    seed_derived = None
+    if args.seed is not None:
+        if args.model != "rby1_transport_14d":
+            ap.error("--seed requires --model rby1_transport_14d")
+        if args.fruit_layout_index is not None or args.fruit_slot_order is not None:
+            ap.error("--seed derives --fruit-layout-index and --fruit-slot-order; "
+                     "pass the seed or the explicit values, not both")
+        rng = np.random.default_rng(args.seed)
+        # layout 0·1 은 run_0004/run_0005 가 이미 썼다. 프롬프트 공통 원칙 2("기존 seed 와
+        # 저장된 결과를 시험 입력으로 재사용하지 않는다")의 보수적 해석이다.
+        args.fruit_layout_index = int(rng.integers(2, 16))
+        args.fruit_slot_order = [FRUIT_TYPES[i] for i in rng.permutation(len(FRUIT_TYPES))][:4]
+        seed_derived = {
+            "seed": int(args.seed),
+            "fruit_layout_index": args.fruit_layout_index,
+            "fruit_slot_order": list(args.fruit_slot_order),
+            # 과일 xy jitter. 겹침 검사는 reset_fruit_grid_scene 이 한다.
+            "position_jitter_xy_m": 0.012,
+            "randomization_spec": "all off — crate/shelf/object_pose/friction/mass 는 "
+                                  "건드리지 않는다 (2026-09-22 판정: nuisance 만)",
+            "layout_range": [2, 15],
+        }
     if args.fruit_preloaded is not None and len(set(args.fruit_preloaded)) != len(
         args.fruit_preloaded
     ):
@@ -624,7 +840,9 @@ def main():
             f"{tuple(obstacle_config['profiles'])}"
         )
     expected_obstacle_scene = (
-        "fruit" if args.model == "rby1_transport_14d" else "block"
+        "fruit"
+        if args.model in ("rby1_transport_14d", "rby1_randomized_pick_place_16d")
+        else "block"
     )
     profile_scene = obstacle_config["profiles"][args.obstacle_profile]["scene"]
     if profile_scene not in ("any", expected_obstacle_scene):
@@ -633,17 +851,18 @@ def main():
             f"--model {args.model} uses {expected_obstacle_scene} scene"
         )
     if args.obstacle_profile != "clear" and args.model not in (
-        "rby1", "rby1_transport_14d"
+        "rby1", "rby1_transport_14d", "rby1_randomized_pick_place_16d"
     ):
         ap.error(
-            "static pick-place obstacles require --model rby1 or rby1_transport_14d"
+            "static pick-place obstacles require --model rby1, rby1_transport_14d "
+            "or rby1_randomized_pick_place_16d"
         )
     if args.checkpoint:
         mcfg = dict(mcfg, checkpoint=args.checkpoint)
     if not args.remote and not mcfg.get("checkpoint"):
         ap.error(f"--model {args.model} requires --remote or --checkpoint")
-    if args.record_inputs and mcfg["obs_format"] not in ("aloha", "rby1"):
-        ap.error("--record-inputs requires --model aloha or --model rby1")
+    if args.record_inputs and mcfg["obs_format"] not in ("aloha", "rby1", "rby1_16d"):
+        ap.error("--record-inputs requires an aloha or rby1 3-camera model")
     if args.trajectory_out and mcfg["obs_format"] != "rby1":
         ap.error("--trajectory-out currently requires --model rby1")
     if args.record_ag3s and mcfg["obs_format"] != "rby1":
@@ -699,6 +918,11 @@ def main():
                 preloaded_objects=args.fruit_preloaded or (),
                 settle_seconds=1.5,
                 basket_clearance_offset=args.fruit_basket_offset,
+                # seed 를 줬으면 과일 xy 를 작게 흔든다. `RandomizationSpec()` 은 손대지
+                # 않으므로 crate·shelf·friction·mass 는 그대로다 — seed 는 **지각이 보는
+                # 것만** 바꾼다.
+                **({"rng": np.random.default_rng(args.seed + 1),
+                    "position_jitter_xy": 0.012} if args.seed is not None else {}),
             )
         except ValueError as exc:
             ap.error(str(exc))
@@ -734,11 +958,36 @@ def main():
             f"{teleop_arm6_targets['right']:+.3f}"
         )
 
+    randomized_episode = None
+    if mcfg["obs_format"] == "rby1_16d":
+        try:
+            randomized_episode = load_randomized_episode(args.episode_index)
+        except (FileNotFoundError, ValueError) as exc:
+            ap.error(str(exc))
+        reset_randomized_scene(m, d, randomized_episode)
+        split = randomized_split_of(args.episode_index)
+        print(
+            f"  scene      : episode {args.episode_index} ({split}) "
+            f"target={randomized_episode['target_fruit']} "
+            f"arm={randomized_episode['used_arm']} "
+            f"layout={randomized_episode['layout_index']}"
+        )
+        if split == "train":
+            print(
+                "  WARNING: this episode was in the training set; the model has seen "
+                "it. Use --episode-index 1600-1999 for a held-out scene."
+            )
+        if args.prompt == DEFAULT_PROMPT:
+            args.prompt = randomized_episode["prompt"]
+            print(f"  prompt     : from episode -- {args.prompt!r}")
+
     # Match atomic-dataset startup exactly: its recorder starts only after both
     # grippers have been commanded to fraction=1.0 (ctrl=-0.045) and settled for
     # 0.5 s. Starting from the teleop keyframe's closed qpos=0.0 would put the
     # first policy state outside the training distribution.
     if mcfg["obs_format"] == "rby1":
+        # rby1_16d is deliberately excluded: reset_randomized_scene() already set
+        # both grippers to the dataset's open value as part of replaying the scene.
         reset_right_arm = right_arm_handles(m)
         reset_left_arm = left_arm_handles(m)
         open_grippers(
@@ -807,7 +1056,7 @@ def main():
     # RBY1 policy inputs must match EpisodeRecorder: render the physical camera at
     # 299x224 (4:3), disable reflections, then resize to the 224x224 policy tensor.
     # Direct 224x224 rendering changes the horizontal FOV and crops nearby objects.
-    if mcfg["obs_format"] == "rby1":
+    if mcfg["obs_format"] in ("rby1", "rby1_16d"):
         renderer_pol = mujoco.Renderer(
             m,
             height=POLICY_SOURCE_HEIGHT,
@@ -864,6 +1113,52 @@ def main():
         )
         print(f"[safe] server-side AG3S+TO; cameras={safe_client.cameras} "
               f"timeout={args.safe_timeout:.1f}s")
+
+    frame_recorder = None
+    if args.record_frames:
+        workspace_root = REPO_ROOT.parent
+        if str(workspace_root) not in sys.path:
+            sys.path.insert(0, str(workspace_root))
+        from benchmark.ag3s.runtime.frame_record import FrameRecorder, collect_manifest
+
+        # manifest 는 **불변 설정**이다. 한 번 쓰고 프레임들이 참조한다 (T0).
+        manifest = collect_manifest(
+            seed=args.seed,
+            scene={"model": args.model, "model_xml": str(mcfg["xml"]),
+                   "obstacle_profile": args.obstacle_profile,
+                   "fruit_layout_index": args.fruit_layout_index,
+                   "fruit_slot_order": list(args.fruit_slot_order or ()),
+                   "fruit_preloaded": list(args.fruit_preloaded or ()),
+                   "fruit_basket_offset": args.fruit_basket_offset,
+                   "seed_derived": seed_derived,
+                   "sim_timestep_s": float(m.opt.timestep)},
+            policy={"prompt": args.prompt, "remote": args.remote,
+                    "safe_remote": bool(args.safe_remote),
+                    "safe_phase": args.safe_phase,
+                    "safe_manipulators": list(args.safe_manipulators),
+                    "safe_timeout_s": args.safe_timeout},
+            # 거리장 설정은 **서버가** 들고 있다. 여기서는 클라이언트가 아는 것만 적고,
+            # 서버가 실제로 무엇을 썼는지는 프레임마다 응답의 `field.backend` 가 답한다 —
+            # 그쪽이 T0 의 "실제로 사용된 backend provenance" 다.
+            esdf={"owner": "server (serve_safe)",
+                  "reported_per_frame_in": "field.backend"},
+            timing={"ctrl_hz": CTRL_HZ, "open_loop_horizon": OPEN_LOOP_HORIZON,
+                    "chunk_period_ms": OPEN_LOOP_HORIZON / CTRL_HZ * 1000.0,
+                    "sim_steps_per_action": steps_per_action,
+                    "speed": args.speed,
+                    # 한도는 서버 설정이다. 클라이언트가 모르면 stale 판정을 못 한다.
+                    "max_field_age_sec": None},
+            cameras=tuple(args.trajopt_cameras or ("zed_left", "wrist_cam_l",
+                                                   "wrist_cam_r")),
+            render={"third_person_video": args.record,
+                    "recording_camera": args.view,
+                    "note": "third-person 프레임은 --record 가 있을 때만 남는다"},
+            extra={"argv": sys.argv},
+        )
+        frame_recorder = FrameRecorder(
+            args.record_frames, manifest=manifest,
+            expected_observation_frames=max(args.max_steps, 0))
+        print(f"[frames] manifest + frames.jsonl -> {args.record_frames}")
 
     live_pipeline = None
     if args.trajopt:
@@ -1060,6 +1355,24 @@ def main():
                 infer_elapsed_ms = (time.time() - t_infer) * 1000.0
                 chunk_step = 0
 
+                if frame_recorder is not None:
+                    # planning frame = 청크 하나. `field` 는 응답이 실어 온 출처이고,
+                    # `ipc` 는 왕복 결과(`ok`/`timeout`/`stale`/`unsafe`/`error`)다 —
+                    # 프롬프트 T0 이 프레임마다 요구하는 IPC 기록이 이 둘이다.
+                    frame_recorder.planning(
+                        seq=(safe_client._seq if safe_client is not None else t_step),
+                        t_step=t_step,
+                        field=(safe_client.last_field if safe_client is not None else None),
+                        verdict=(dict(safe_client.last_verdict)
+                                 if safe_client is not None else {}),
+                        timing_ms={"policy_infer": infer_elapsed_ms},
+                        ipc=(safe_client.last_ipc if safe_client is not None
+                             else "in-process"),
+                        extra={"safe": (bool(safe_client.last_safe)
+                                        if safe_client is not None else None),
+                               "hold_reason": (safe_client.last_reason
+                                               if safe_client is not None else "")})
+
                 if live_pipeline is not None:
                     # closed loop: TO 가 고친 청크를 **실제로 실행한다**. 실패해도 예외를 내지
                     # 않고 정책 청크를 그대로 돌려주는 것이 refiner 의 계약이라, 지각 한 프레임이
@@ -1119,6 +1432,16 @@ def main():
             else:
                 action = np.asarray(chunk[chunk_step], dtype=np.float64)
             apply_action(mcfg["action_format"], action, d, idx, act)
+
+            if frame_recorder is not None:
+                # control frame = 개별 제어 스텝. **여기서 `carried`/`stale` 이 생긴다** —
+                # `step_in_chunk > 0` 이면 이 스텝의 기하는 이번 프레임에 갱신된 것이 아니다.
+                frame_recorder.control(
+                    t_step=t_step, chunk_seq=(safe_client._seq
+                                              if safe_client is not None else t_step),
+                    step_in_chunk=chunk_step, now=time.monotonic(),
+                    field=(safe_client.last_field if safe_client is not None else None),
+                    executed=bool(safe_client is None or safe_client.last_safe))
 
             obstacle_stopped = False
             for sim_step in range(steps_per_action):
@@ -1187,6 +1510,12 @@ def main():
                 print("(imageio not installed, saved as PNG sequence)")
         if args.record_inputs:
             save_policy_input_videos(args.record_inputs, input_frame_buffers)
+        if frame_recorder is not None:
+            table = frame_recorder.close(
+                ipc_stats=(dict(safe_client.stats) if safe_client is not None else None))
+            print("[frames] completeness:")
+            for k, v in table.items():
+                print(f"    {k}: {v}")
         if safe_client is not None:
             safe_client.close()
         if live_pipeline is not None:
