@@ -128,8 +128,14 @@ RBY1_GRIPPER_OPEN = -0.045
 
 DEFAULT_PROMPT = "put the red block in the brown box with your right hand"
 
+# Where the 16-D dataset metadata lives. Only meta/ is read, to reconstruct a
+# recorded scene -- the parquet/video shards are not needed. Set
+# RBY1_16D_DATASET to point at a different checkout.
 RANDOMIZED_16D_DATASET = pathlib.Path(
-    "/mnt/dev/work/pi05_TO_hybrid/data/rby1_randomized_pick_place_16d_v1"
+    os.environ.get(
+        "RBY1_16D_DATASET",
+        "/mnt/dev/work/pi05_TO_hybrid/data/rby1_randomized_pick_place_16d_v1",
+    )
 )
 
 CTRL_HZ = 15
@@ -879,6 +885,14 @@ def main():
         ap.error("--trajopt requires --model rby1 (AG3S is wired to the RB-Y1 cameras)")
     if args.record_constraints and not args.trajopt:
         ap.error("--record-constraints only does something together with --trajopt")
+    # These files are only written once the rollout finishes. Create their
+    # directories now so a missing parent does not discard a completed run.
+    for output_path in (args.record, args.trajectory_out):
+        if output_path:
+            parent = pathlib.Path(output_path).expanduser().parent
+            if str(parent):
+                parent.mkdir(parents=True, exist_ok=True)
+
     print(f"=== Model: {args.model} ===")
     if args.remote:
         print(f"  remote     : {args.remote}  (server must serve obs_format={mcfg['obs_format']!r})")

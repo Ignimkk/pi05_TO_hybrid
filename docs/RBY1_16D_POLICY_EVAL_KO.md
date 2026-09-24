@@ -16,7 +16,8 @@ GPU server 가 policy 를 serve 하고, 로컬 PC 가 MuJoCo 를 띄워 websocke
                   <--action chunk--
 ```
 
-- **server**: [logs/serve_rby1_16d.sh](../logs/serve_rby1_16d.sh), tmux `rby1_16d_serve`, port 8000.
+- **server**: [logs/serve_rby1_16d.sh](../logs/serve_rby1_16d.sh), port 8000. 컨테이너에 ssh 로 붙어
+  그대로 foreground 로 돌린다 — checkpoint 로딩에 약 40초.
   `XLA_FLAGS="--xla_gpu_enable_command_buffer="` 는 **필수**다. 없이 띄우면 요청 하나에
   `CUDA graph kernel node params` 에러가 나고 그 뒤로 서버가 영구히 죽는다.
 - **tunnel** (로컬 PC 에서):
