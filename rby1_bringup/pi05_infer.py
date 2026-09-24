@@ -869,20 +869,28 @@ def main():
         ap.error(f"--model {args.model} requires --remote or --checkpoint")
     if args.record_inputs and mcfg["obs_format"] not in ("aloha", "rby1", "rby1_16d"):
         ap.error("--record-inputs requires an aloha or rby1 3-camera model")
-    if args.trajectory_out and mcfg["obs_format"] != "rby1":
-        ap.error("--trajectory-out currently requires --model rby1")
-    if args.record_ag3s and mcfg["obs_format"] != "rby1":
-        ap.error("--record-ag3s requires --model rby1 (AG3S is wired to the RB-Y1 cameras)")
+    # AG3S 는 RB-Y1 의 **카메라**에 배선되어 있다 — action 차원이 아니다. 14D 와 16D 는 같은
+    # 세 카메라를 쓰므로 둘 다 받는다 (2026-09-24, 16D 전환).
+    AG3S_OBS_FORMATS = ("rby1", "rby1_16d")
+    if args.trajectory_out and mcfg["obs_format"] not in AG3S_OBS_FORMATS:
+        ap.error(f"--trajectory-out requires an RB-Y1 model, got {mcfg['obs_format']!r}")
+    if args.record_ag3s and mcfg["obs_format"] not in AG3S_OBS_FORMATS:
+        ap.error(f"--record-ag3s requires an RB-Y1 model with the three AG3S cameras "
+                 f"(obs_format in {AG3S_OBS_FORMATS}), got {mcfg['obs_format']!r}")
     if args.record_depth is not None and not args.record_ag3s:
         ap.error("--record-depth only does something together with --record-ag3s")
     if args.safe_remote and not args.remote:
         ap.error("--safe-remote requires --remote (the safety layer runs on the server)")
     if args.safe_remote and args.trajopt:
         ap.error("--safe-remote and --trajopt are two places to run the same layer; pick one")
-    if args.safe_remote and mcfg["obs_format"] != "rby1":
-        ap.error("--safe-remote requires --model rby1 (AG3S is wired to the RB-Y1 cameras)")
-    if args.trajopt and mcfg["obs_format"] != "rby1":
-        ap.error("--trajopt requires --model rby1 (AG3S is wired to the RB-Y1 cameras)")
+    # 전에는 `obs_format != "rby1"` 로 걸러 16D 를 거절했는데, 그 조건은 카메라가 아니라
+    # 차원을 보고 있었다.
+    if args.safe_remote and mcfg["obs_format"] not in AG3S_OBS_FORMATS:
+        ap.error(f"--safe-remote requires an RB-Y1 model with the three AG3S cameras "
+                 f"(obs_format in {AG3S_OBS_FORMATS}), got {mcfg['obs_format']!r}")
+    if args.trajopt and mcfg["obs_format"] not in AG3S_OBS_FORMATS:
+        ap.error(f"--trajopt requires an RB-Y1 model with the three AG3S cameras "
+                 f"(obs_format in {AG3S_OBS_FORMATS}), got {mcfg['obs_format']!r}")
     if args.record_constraints and not args.trajopt:
         ap.error("--record-constraints only does something together with --trajopt")
     # These files are only written once the rollout finishes. Create their
@@ -1138,7 +1146,28 @@ def main():
         # manifest 는 **불변 설정**이다. 한 번 쓰고 프레임들이 참조한다 (T0).
         manifest = collect_manifest(
             seed=args.seed,
-            scene={"model": args.model, "model_xml": str(mcfg["xml"]),
+            scene={"model": args.model,
+                   # MODELS 항목의 키는 `model_xml` 이다. 없는 항목도 있으므로 get 을 쓴다.
+                   "model_xml": str(mcfg.get("model_xml") or ""),
+                   "obs_format": mcfg["obs_format"],
+                   "action_format": mcfg["action_format"],
+                   "policy_config": mcfg.get("config"),
+                   # 16D 는 씬을 기록된 에피소드에서 재생한다 — 그것이 seed 의 자리다.
+                   "episode_index": getattr(args, "episode_index", None),
+                   "episode_split": (randomized_split_of(args.episode_index)
+                                     if mcfg["obs_format"] == "rby1_16d" else None),
+                   "episode_target_fruit": (randomized_episode or {}).get("target_fruit"),
+                   "episode_used_arm": (randomized_episode or {}).get("used_arm"),
+                   "episode_prompt": (randomized_episode or {}).get("prompt"),
+                   # 배치와 슬롯 순서는 **에피소드가 정한다** (`--fruit-*` 는 안 쓰인다).
+                   # 이것이 없으면 "새 씬이었다" 를 기록만으로 되짚을 수 없다 — 아래
+                   # `fruit_layout_index` 는 명령줄 인자이고 16D 경로에서는 언제나 None 이다.
+                   "episode_layout_index": (randomized_episode or {}).get("layout_index"),
+                   "episode_slot_order": list((randomized_episode or {}).get("slot_order")
+                                              or ()),
+                   "episode_non_target_fruits": list(
+                       (randomized_episode or {}).get("non_target_fruits") or ()),
+                   "episode_task_type": (randomized_episode or {}).get("task_type"),
                    "obstacle_profile": args.obstacle_profile,
                    "fruit_layout_index": args.fruit_layout_index,
                    "fruit_slot_order": list(args.fruit_slot_order or ()),
@@ -1169,9 +1198,17 @@ def main():
                     "note": "third-person 프레임은 --record 가 있을 때만 남는다"},
             extra={"argv": sys.argv},
         )
+        # 관측 프레임은 **정책 호출당 한 번**이다 — 제어 스텝당 한 번이 아니다. 카메라
+        # 캡처와 AG3S 한 바퀴는 아래 `chunk_step >= OPEN_LOOP_HORIZON` 분기 안에서만
+        # 일어나고, 그 사이 7 스텝은 이미 받은 청크를 그대로 흘려보낸다. 처음에는 이
+        # 기대값을 `max_steps` 로 잡아 10 을 기대했는데, 그러면 실제로 일어나지 않은
+        # 관측 8 개가 영구히 "누락" 으로 남아 completeness 가 절대 닫히지 않는다.
+        # 기대와 실제가 같은가를 세는 표에서 **기대 쪽이 틀린 경우**다.
+        n_policy_calls = (0 if args.max_steps <= 0
+                          else -(-args.max_steps // OPEN_LOOP_HORIZON))
         frame_recorder = FrameRecorder(
             args.record_frames, manifest=manifest,
-            expected_observation_frames=max(args.max_steps, 0))
+            expected_observation_frames=n_policy_calls)
         print(f"[frames] manifest + frames.jsonl -> {args.record_frames}")
 
     live_pipeline = None
@@ -1282,13 +1319,30 @@ def main():
         configure_view_camera(ctx.cam, args.view)
         ctx.sync()
 
+    #: 팔당 관절 수. 14-D 는 6 (arm_6 를 고정으로 두고), 16-D 는 7 (arm_6 까지 지령).
+    #: **차원에서 파생시킨다** — `[:6]` 을 박아 두면 16-D hold 경로가 14-D 를 내고
+    #: `apply_action` 이 거절한다 (2026-09-24 실측: T0 첫 청크가 그렇게 죽었다).
+    ARM_JOINT_DIM = 7 if mcfg["action_format"] == "rby1_16d" else 6
+
     def rby1_state():
-        """Current 14-D physical state in the policy/action layout."""
-        left = np.asarray([d.qpos[i] for i in idx["left_q"][:6]], dtype=np.float64)
-        right = np.asarray([d.qpos[i] for i in idx["right_q"][:6]], dtype=np.float64)
+        """Current physical state in the policy/action layout.
+
+        레이아웃은 `[왼팔 N, 왼 그리퍼, 오른팔 N, 오른 그리퍼]` 이고 `N = ARM_JOINT_DIM` 이다
+        (`build_obs` 의 `rby1_16d` 분기와 같은 순서). hold 청크의 모든 행이 이 값이 되므로
+        차원이 틀리면 안전 판정이 아니라 예외로 죽는다.
+        """
+        n = ARM_JOINT_DIM
+        left = np.asarray([d.qpos[i] for i in idx["left_q"][:n]], dtype=np.float64)
+        right = np.asarray([d.qpos[i] for i in idx["right_q"][:n]], dtype=np.float64)
         left_grip = float(abs(d.qpos[idx["left_grip_q"]]) / abs(RBY1_GRIPPER_OPEN))
         right_grip = float(abs(d.qpos[idx["right_grip_q"]]) / abs(RBY1_GRIPPER_OPEN))
-        return np.concatenate([left, [left_grip], right, [right_grip]])
+        out = np.concatenate([left, [left_grip], right, [right_grip]])
+        expected = 2 * (n + 1)
+        if out.shape != (expected,):
+            raise ValueError(
+                f"rby1_state 가 {out.shape} 를 냈는데 action_format "
+                f"{mcfg['action_format']!r} 은 ({expected},) 를 기대합니다")
+        return out
 
     def wait_before_inference():
         """Advance the initial scene in real time before requesting an action."""
@@ -1370,6 +1424,39 @@ def main():
                 chunk_step = 0
 
                 if frame_recorder is not None:
+                    # observation frame = 카메라 캡처 + AG3S 한 바퀴. planning 과 1:1 이지만
+                    # **재는 것이 다르다**: 이쪽은 촬영 시각과 지각 판정, 저쪽은 SQP 결과다.
+                    #
+                    # 촬영 시각은 클라이언트가 실제로 찍은 값(`last_stamps`)이다. 응답의
+                    # `observed_at` 은 서버가 고른 가장 최근 한 개뿐이라 카메라 간 시차를
+                    # 복원할 수 없다 — 세 대를 순차로 렌더하므로 그 시차가 손목 클라우드의
+                    # 번짐으로 그대로 나타난다.
+                    #
+                    # grounding 상태와 점 개수는 **서버 안에만 있다** (응답에는 안전 판정과
+                    # 카메라당 attention 셀 하나뿐이다). 모르는 것을 지어내지 않고
+                    # `unavailable-on-client` 로 적는다 — 이 둘을 프레임 카드에 실으려면
+                    # 와이어에 필드를 늘려야 하고, 그것은 T1(프레임별 진단 카드)의 일이다.
+                    _obs_stamps = (dict(safe_client.last_stamps)
+                                   if safe_client is not None else {})
+                    _obs_status = (str(safe_client.last_verdict.get("ag3s_status") or "")
+                                   if safe_client is not None else "in-process")
+                    frame_recorder.observation(
+                        t_step=t_step, stamps=_obs_stamps,
+                        ag3s_status=_obs_status,
+                        grounding_status="unavailable-on-client",
+                        validity=("certified" if (safe_client is not None
+                                                  and safe_client.last_verdict.get(
+                                                      "geometry_certified"))
+                                  else "not-certified"),
+                        n_points=None,
+                        notes=(["grounding 상태·점 개수는 서버 안에만 있다 (T1 에서 와이어에 싣는다)"]
+                               if safe_client is not None else
+                               ["in-process 경로: 카메라 스탬프가 클라이언트에 없다"]),
+                        extra={"cameras": sorted(_obs_stamps),
+                               "ipc": (safe_client.last_ipc if safe_client is not None
+                                       else "in-process")})
+
+                if frame_recorder is not None:
                     # planning frame = 청크 하나. `field` 는 응답이 실어 온 출처이고,
                     # `ipc` 는 왕복 결과(`ok`/`timeout`/`stale`/`unsafe`/`error`)다 —
                     # 프롬프트 T0 이 프레임마다 요구하는 IPC 기록이 이 둘이다.
@@ -1385,7 +1472,11 @@ def main():
                         extra={"safe": (bool(safe_client.last_safe)
                                         if safe_client is not None else None),
                                "hold_reason": (safe_client.last_reason
-                                               if safe_client is not None else "")})
+                                               if safe_client is not None else ""),
+                               # **실행된 청크의 실제 폭.** manifest 의 `action_format` 은
+                               # 설정 문자열이고, 이것은 그 프레임에 정말 무엇이 왔는지다.
+                               # 14D→16D 전환에서 바뀐 값이므로 프레임마다 남긴다.
+                               "chunk_shape": list(np.asarray(chunk).shape)})
 
                 if live_pipeline is not None:
                     # closed loop: TO 가 고친 청크를 **실제로 실행한다**. 실패해도 예외를 내지
