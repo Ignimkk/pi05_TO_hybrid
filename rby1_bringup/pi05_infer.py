@@ -256,6 +256,32 @@ def randomized_split_of(episode_index):
     return None
 
 
+def hold_keyframe_pose(m, d):
+    """Point every joint actuator at the pose the keyframe just set.
+
+    `mj_resetDataKeyframe` applies the key's `qpos` **and** its `ctrl`. The
+    `teleop` key carries no `ctrl`, so every position actuator is left commanding
+    0 while `qpos` holds the teleop pose — and the actuators win as soon as the
+    scene settles. The arms survived only because both reset paths overwrite
+    their `ctrl` explicitly right afterwards.
+
+    **The head did not.** `head_1` starts at 0.7 rad (looking down at the table)
+    and `head_1_act` dragged it to 0 during the settle, so `cam_high` recorded a
+    wall instead of the table. Every 16-D record taken before 2026-09-25 has that
+    (`run_16d_ep1800`, `20260924_long16d`), and the policy was fed those frames.
+
+    The collection path never had the bug because it holds *every* actuated joint
+    at its keyframe qpos (`transport_scene.py`). This is the same thing, so the
+    two paths agree. Callers that want a different target still overwrite `ctrl`
+    after this returns.
+    """
+    for actuator in range(m.nu):
+        if m.actuator_trntype[actuator] != mujoco.mjtTrn.mjTRN_JOINT:
+            continue
+        joint = m.actuator_trnid[actuator, 0]
+        d.ctrl[actuator] = d.qpos[m.jnt_qposadr[joint]]
+
+
 def reset_randomized_scene(m, d, record, settle_seconds=1.5):
     """Restore the exact initial state the recorded episode started from.
 
@@ -267,6 +293,7 @@ def reset_randomized_scene(m, d, record, settle_seconds=1.5):
     key = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "teleop")
     if key >= 0:
         mujoco.mj_resetDataKeyframe(m, d, key)
+        hold_keyframe_pose(m, d)
 
     def joint_qposadr(name):
         joint_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, name)
@@ -920,6 +947,7 @@ def main():
     d = mujoco.MjData(m)
     key = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "teleop")
     mujoco.mj_resetDataKeyframe(m, d, key)
+    hold_keyframe_pose(m, d)
     teleop_arm6_targets = {}
     for side, joint_name in (
         ("left", LEFT_ARM_JOINTS[6]),
