@@ -710,6 +710,14 @@ def main():
                     help="서버가 π0.5+SEAM+AG3S+TO를 한 프로세스로 돌린다. 로컬은 3카메라 "
                          "관측을 보내고, 서버의 안전 판정이 유효할 때만 앞 8개 action을 "
                          "실행한다. unsafe·timeout·오래된 응답·서버 오류면 현재 관절을 hold")
+    ap.add_argument("--safe-shadow", action="store_true",
+                    help="shadow 실행(T5). 서버는 AG3S·ESDF·SQP·판정을 **전부** 돌지만 로봇은 "
+                         "정책의 **원본** 청크를 실행한다 — 수정이 여유거리를 나쁘게 만드는지를 "
+                         "로봇을 움직이기 전에 보려는 것이다. 판정이 unsafe 여도 hold 하지 "
+                         "않는다(멈추면 에피소드가 서고 볼 것이 없어진다). 판정과 사유는 "
+                         "프레임마다 그대로 기록된다. 서버도 `--shadow` 로 떠 있어야 하고, "
+                         "짝이 안 맞으면 즉시 죽는다. timeout·오래된 응답·서버 오류는 shadow "
+                         "에서도 hold 다")
     ap.add_argument("--safe-timeout", type=float, default=2.0, metavar="SEC",
                     help="서버 응답 제한 시간. 넘으면 hold")
     ap.add_argument("--safe-phase", default="approach",
@@ -910,6 +918,10 @@ def main():
         ap.error("--safe-remote requires --remote (the safety layer runs on the server)")
     if args.safe_remote and args.trajopt:
         ap.error("--safe-remote and --trajopt are two places to run the same layer; pick one")
+    if args.safe_shadow and not args.safe_remote:
+        ap.error("--safe-shadow requires --safe-remote: shadow means the server runs the whole "
+                 "pipeline and the robot executes the policy's own chunk. Without the server "
+                 "there is no refined chunk to shadow")
     # 전에는 `obs_format != "rby1"` 로 걸러 16D 를 거절했는데, 그 조건은 카메라가 아니라
     # 차원을 보고 있었다.
     if args.safe_remote and mcfg["obs_format"] not in AG3S_OBS_FORMATS:
@@ -1160,16 +1172,33 @@ def main():
             phase=args.safe_phase,
             active_manipulators=tuple(args.safe_manipulators),
             trace_dir=args.trace,
+            shadow=args.safe_shadow,
         )
         print(f"[safe] server-side AG3S+TO; cameras={safe_client.cameras} "
               f"timeout={args.safe_timeout:.1f}s")
+        if args.safe_shadow:
+            # **어느 모드인지 크게 말한다.** 로그만 보고 이 실행이 로봇을 무엇으로 움직였는지
+            # 알 수 있어야 한다 — shadow 와 닫힌 고리의 궤적은 겉보기에 구별되지 않는다.
+            print("[shadow] the server runs everything but the robot executes the POLICY "
+                  "reference chunk; an unsafe verdict is recorded and does NOT hold")
 
     frame_recorder = None
+    #: MuJoCo 참값(과일 넷 + crate)을 읽는 probe. **기록할 때만 만든다** — `--record-frames`
+    #: 없이 도는 실행은 `scene_truth` 를 import 조차 하지 않고, 매 프레임 body 자세를 뽑는
+    #: 비용을 한 번도 물지 않는다. `tests/ag3s/test_record_cost_guard.py` 가 이 파일에서
+    #: 그 성질을 고정한다 (모든 사용이 기록 분기 안에 있는가).
+    scene_truth = None
     if args.record_frames:
         workspace_root = REPO_ROOT.parent
         if str(workspace_root) not in sys.path:
             sys.path.insert(0, str(workspace_root))
         from benchmark.ag3s.runtime.frame_record import FrameRecorder, collect_manifest
+        from benchmark.ag3s.runtime.scene_truth import ObjectPoseProbe, joint_positions
+
+        # body id 를 **한 번** 찾는다. 매 프레임 `mj_name2id` 를 물으면 없는 이름의 `-1` 이
+        # 프레임마다 다시 나타나, "이 프레임에 사과가 없었다" 와 "이 모델에 사과가 처음부터
+        # 없다" 가 구별되지 않는다.
+        scene_truth = ObjectPoseProbe(m)
 
         # manifest 는 **불변 설정**이다. 한 번 쓰고 프레임들이 참조한다 (T0).
         manifest = collect_manifest(
@@ -1205,6 +1234,7 @@ def main():
                    "sim_timestep_s": float(m.opt.timestep)},
             policy={"prompt": args.prompt, "remote": args.remote,
                     "safe_remote": bool(args.safe_remote),
+                    **({"safe_shadow": True} if args.safe_shadow else {}),
                     "safe_phase": args.safe_phase,
                     "safe_manipulators": list(args.safe_manipulators),
                     "safe_timeout_s": args.safe_timeout},
@@ -1224,7 +1254,11 @@ def main():
             render={"third_person_video": args.record,
                     "recording_camera": args.view,
                     "note": "third-person 프레임은 --record 가 있을 때만 남는다"},
-            extra={"argv": sys.argv},
+            extra={"argv": sys.argv,
+                   # **무엇을 참값으로 쟀고 무엇이 이 모델에 없었나.** 없는 body 는 예외가
+                   # 아니고(씬 XML 이 profile 마다 다르다) 여기 한 줄로 남는다 — "안 쟀다" 와
+                   # "재려고 했는데 없었다" 는 다른 사실이다.
+                   "object_truth": scene_truth.describe()},
         )
         # 관측 프레임은 **정책 호출당 한 번**이다 — 제어 스텝당 한 번이 아니다. 카메라
         # 캡처와 AG3S 한 바퀴는 아래 `chunk_step >= OPEN_LOOP_HORIZON` 분기 안에서만
@@ -1460,29 +1494,40 @@ def main():
                     # 복원할 수 없다 — 세 대를 순차로 렌더하므로 그 시차가 손목 클라우드의
                     # 번짐으로 그대로 나타난다.
                     #
-                    # grounding 상태와 점 개수는 **서버 안에만 있다** (응답에는 안전 판정과
-                    # 카메라당 attention 셀 하나뿐이다). 모르는 것을 지어내지 않고
-                    # `unavailable-on-client` 로 적는다 — 이 둘을 프레임 카드에 실으려면
-                    # 와이어에 필드를 늘려야 하고, 그것은 T1(프레임별 진단 카드)의 일이다.
+                    # **grounding 상태는 이제 와이어로 온다** (T5b — 응답의 `ag3s` 블록).
+                    # 그 전까지는 `unavailable-on-client` 로 적었고, 그래서 첫 live smoke 에서
+                    # 절반이 `degraded` 로 HOLD 된 이유를 로컬 기록만 보고는 알 수 없었다.
+                    # 블록은 `ag3s_status` 가 `ok` 가 **아닐 때만** 오므로, 안 왔으면
+                    # 인증된 프레임이라는 뜻이다 — 그때는 예전 문자열을 그대로 쓴다.
+                    # 점 개수는 여전히 서버 안에만 있다 (지어내지 않는다).
                     _obs_stamps = (dict(safe_client.last_stamps)
                                    if safe_client is not None else {})
                     _obs_status = (str(safe_client.last_verdict.get("ag3s_status") or "")
                                    if safe_client is not None else "in-process")
+                    _ag3s = dict(safe_client.last_ag3s) if safe_client is not None else {}
+                    _reasons = list(_ag3s.get("reasons") or ())
                     frame_recorder.observation(
                         t_step=t_step, stamps=_obs_stamps,
                         ag3s_status=_obs_status,
-                        grounding_status="unavailable-on-client",
+                        grounding_status=str(_ag3s.get("grounding_status")
+                                             or "unavailable-on-client"),
                         validity=("certified" if (safe_client is not None
                                                   and safe_client.last_verdict.get(
                                                       "geometry_certified"))
                                   else "not-certified"),
                         n_points=None,
-                        notes=(["grounding 상태·점 개수는 서버 안에만 있다 (T1 에서 와이어에 싣는다)"]
+                        notes=(list(_ag3s.get("notes") or ())
+                               or ["점 개수는 서버 안에만 있다 (와이어에는 사유만 싣는다)"]
                                if safe_client is not None else
                                ["in-process 경로: 카메라 스탬프가 클라이언트에 없다"]),
                         extra={"cameras": sorted(_obs_stamps),
                                "ipc": (safe_client.last_ipc if safe_client is not None
-                                       else "in-process")})
+                                       else "in-process"),
+                               # **사유는 코드로도 남긴다.** 산문을 파싱해 판정을 세지
+                               # 않게 하려는 것이고, 코드 하나가 AG3S 소스의 한 분기다.
+                               # 인증된 프레임에는 빈 목록이라 옛 기록과 모양이 같다.
+                               "ag3s_reasons": _reasons,
+                               "ag3s_reason_codes": [r.get("code") for r in _reasons]})
 
                 if frame_recorder is not None:
                     # planning frame = 청크 하나. `field` 는 응답이 실어 온 출처이고,
@@ -1497,6 +1542,27 @@ def main():
                         timing_ms={"policy_infer": infer_elapsed_ms},
                         ipc=(safe_client.last_ipc if safe_client is not None
                              else "in-process"),
+                        # **T6a — 청크와 참값을 남긴다.** `T5c` 가 `refined` 대 `reference`
+                        # 여유거리 비교를, `T6` 가 "영구히 멈춘 자리가 어디인가" 를 각각
+                        # 미측정으로 닫은 것이 이 네 값이 없었기 때문이다.
+                        #
+                        # **청크는 클라이언트에서 가져온다** — `result["actions"]` 는 shadow 에서
+                        # reference 로 바뀌어 나오므로, 여기서 그것을 쓰면 모드에 따라 `actions`
+                        # 의 뜻이 달라진다. `last_actions_refined` 는 언제나 서버가 계산한 쪽이다.
+                        #
+                        # 서버 없이 도는 in-process(`--trajopt`) 경로에서는 `None` 이다:
+                        # 그쪽의 수정은 **이 기록 다음에** 일어나므로(아래 `live_pipeline.refine`),
+                        # 여기서 무엇을 적어도 refined 가 아니다. 지어내지 않고 비워 둔다.
+                        actions=(safe_client.last_actions_refined
+                                 if safe_client is not None else None),
+                        actions_reference=(safe_client.last_actions_reference
+                                           if safe_client is not None else None),
+                        max_violation_pair=(safe_client.last_violation_pair
+                                            if safe_client is not None else None),
+                        # 자유물체까지 포함한 `qpos` 전체와 MuJoCo body 참값. 둘 다 이 분기
+                        # 안에서만 계산된다 — 기록하지 않는 실행은 한 번도 물지 않는다.
+                        qpos=joint_positions(d),
+                        object_poses=scene_truth.poses(d),
                         extra={"safe": (bool(safe_client.last_safe)
                                         if safe_client is not None else None),
                                "hold_reason": (safe_client.last_reason
@@ -1504,7 +1570,21 @@ def main():
                                # **실행된 청크의 실제 폭.** manifest 의 `action_format` 은
                                # 설정 문자열이고, 이것은 그 프레임에 정말 무엇이 왔는지다.
                                # 14D→16D 전환에서 바뀐 값이므로 프레임마다 남긴다.
-                               "chunk_shape": list(np.asarray(chunk).shape)})
+                               "chunk_shape": list(np.asarray(chunk).shape),
+                               # **왜 인증이 안 됐나** — 청크 단위로도 센다 (T5b). 인증된
+                               # 프레임에서는 빈 목록이다. 키를 **항상** 두는 것은 A2 가
+                               # 프레임을 세로로 세기 때문이다 — 있다/없다가 섞이면 파서가
+                               # 두 갈래로 갈린다.
+                               "ag3s_reason_codes": [
+                                   r.get("code") for r in
+                                   ((safe_client.last_ag3s.get("reasons") or ())
+                                    if safe_client is not None else ())],
+                               # shadow 일 때만 더한다. `safe=False` 인데 로봇이 움직인
+                               # 프레임은 이 두 키가 없으면 읽는 사람이 해석할 수 없다.
+                               **({"shadow": True,
+                                   "executed_chunk": safe_client.last_executed_chunk}
+                                  if safe_client is not None and safe_client.shadow
+                                  else {})})
 
                 if live_pipeline is not None:
                     # closed loop: TO 가 고친 청크를 **실제로 실행한다**. 실패해도 예외를 내지
@@ -1554,15 +1634,23 @@ def main():
                 # sim time is frozen; re-anchor so we resume real-time from here.
                 next_action_deadline = time.monotonic()
 
-            if safe_client is not None and not safe_client.last_safe:
+            if safe_client is not None and not safe_client.should_execute:
                 # hold: 현재 관절을 그대로 목표로 준다. 정지가 아니라 **유지**다 — 제어를
                 # 끊으면 팔이 중력으로 떨어지고, 그것은 안전 판정이 막으려던 것보다 나쁘다.
                 # 앞 `execution_length` 개만 실행한다는 규칙도 여기서 함께 지켜진다:
                 # 안전하지 않은 청크는 한 스텝도 실행되지 않는다.
+                #
+                # **`should_execute` 를 보는 이유**: shadow 가 아니면 `last_safe` 와 정확히
+                # 같고(기본 동작이 그대로다), shadow 면 unsafe 판정에도 원본 청크가 실행된다.
                 action = rby1_state()
                 if chunk_step == 0:
                     print(f"[safe] t={t_step} HOLD — {safe_client.last_reason}")
             else:
+                if (safe_client is not None and safe_client.shadow and chunk_step == 0
+                        and not safe_client.last_safe):
+                    # 조용히 넘기지 않는다. shadow 의 목적은 unsafe 프레임을 **보는** 것이다.
+                    print(f"[shadow] t={t_step} verdict UNSAFE, executing the reference chunk "
+                          f"anyway — {safe_client.last_reason}")
                 action = np.asarray(chunk[chunk_step], dtype=np.float64)
             apply_action(mcfg["action_format"], action, d, idx, act)
 
@@ -1574,7 +1662,18 @@ def main():
                                               if safe_client is not None else t_step),
                     step_in_chunk=chunk_step, now=time.monotonic(),
                     field=(safe_client.last_field if safe_client is not None else None),
-                    executed=bool(safe_client is None or safe_client.last_safe))
+                    executed=bool(safe_client is None or safe_client.should_execute),
+                    # **`executed` 는 "실행하기로 했나" 이고 `qpos` 는 "그래서 팔이 어디
+                    # 있었나" 다.** T6 에서 seq 38 부터 38 chunk 가 연속으로 멈췄는데 그 자리를
+                    # 못 찾은 것이 이 값이 없었기 때문이다. `apply_action` 직후·`mj_step` 전의
+                    # 값이므로 이 action 이 지령된 순간의 자세다.
+                    qpos=joint_positions(d),
+                    # **무엇을 실행했는지**는 shadow 에서만 애매하다 (판정이 unsafe 인데
+                    # 움직였다). 그래서 shadow 일 때만 키를 더한다 — T0 기록의 키 집합을
+                    # 그대로 두면서, 있으면 그 자체로 "이 실행은 shadow" 라는 표시가 된다.
+                    extra=({"executed_chunk": safe_client.last_executed_chunk,
+                            "shadow": True}
+                           if safe_client is not None and safe_client.shadow else None))
 
             obstacle_stopped = False
             for sim_step in range(steps_per_action):
