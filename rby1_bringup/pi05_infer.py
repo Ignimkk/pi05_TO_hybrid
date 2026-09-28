@@ -720,6 +720,21 @@ def main():
                          "에서도 hold 다")
     ap.add_argument("--safe-timeout", type=float, default=2.0, metavar="SEC",
                     help="서버 응답 제한 시간. 넘으면 hold")
+    # T23 — 실행 게이트와 HOLD. 세 flag 모두 기본값이 새 동작이고, `legacy` 가 T23 전 동작이다.
+    ap.add_argument("--safe-gate", choices=("reasons", "legacy"), default="reasons",
+                    help="실행 게이트 (T23). reasons(기본): 서버 safe 와 verdict_reasons 의 처리가 "
+                         "둘 다 실행일 때만 실행 — 권한 link↔조작 대상 접촉(allowed_contact)·가려진 "
+                         "target(occluded_target)·예산 종료(budget_only)는 실행, collision·"
+                         "uncertified·unverified·통신 실패는 HOLD. legacy: T23 전 판정 "
+                         "(trajopt_status 가 optimal/feasible 일 때만)")
+    ap.add_argument("--safe-hold-mode", choices=("fixed", "legacy"), default="fixed",
+                    help="HOLD 동안의 목표 (T23). fixed(기본): HOLD 에 들어갈 때 직전 스텝에 "
+                         "명령한 팔 목표(d.ctrl)를 q_hold 로 한 번 잡아 유지하고, gripper 는 마지막 "
+                         "명령을 유지한다(열지도 닫지도 않는다). legacy: 매 스텝 측정 관절·개도 "
+                         "(rby1_state) — T23 전 동작")
+    ap.add_argument("--safe-max-hold-chunks", type=int, default=None, metavar="N",
+                    help="연속 HOLD 청크가 N 을 넘으면 실행을 중단하고 사유를 보고한다 (T23). "
+                         "기본 없음 = 무한 (값은 측정으로 정한다)")
     ap.add_argument("--safe-phase", default="approach",
                     help="AG3S에 주입할 조작 단계. AG3S는 절대 추론하지 않는다")
     ap.add_argument("--safe-manipulators", nargs="*", default=(), metavar="NAME",
@@ -918,6 +933,10 @@ def main():
         ap.error("--safe-remote requires --remote (the safety layer runs on the server)")
     if args.safe_remote and args.trajopt:
         ap.error("--safe-remote and --trajopt are two places to run the same layer; pick one")
+    if args.safe_max_hold_chunks is not None and not args.safe_remote:
+        ap.error("--safe-max-hold-chunks only does something together with --safe-remote")
+    if args.safe_max_hold_chunks is not None and args.safe_max_hold_chunks < 0:
+        ap.error(f"--safe-max-hold-chunks must be >= 0, got {args.safe_max_hold_chunks}")
     if args.safe_shadow and not args.safe_remote:
         ap.error("--safe-shadow requires --safe-remote: shadow means the server runs the whole "
                  "pipeline and the robot executes the policy's own chunk. Without the server "
@@ -1154,13 +1173,17 @@ def main():
     input_frame_buffers = {name: [] for name in POLICY_CAMERA_NAMES}
 
     safe_client = None
+    #: 직전 청크의 **실행 사실**을 모으는 것 (T18). `--safe-remote` 일 때만 있다.
+    exec_log = None
+    #: HOLD 동안 무엇을 줄지와 연속 HOLD 한도 (T23). `--safe-remote` 일 때만 있다.
+    hold_ctl = None
     if args.safe_remote:
         workspace_root = REPO_ROOT.parent
         if str(workspace_root) not in sys.path:
             sys.path.insert(0, str(workspace_root))
         from benchmark.ag3s.experiments.sources.mujoco_source import TransportScene
         from benchmark.trajopt import wire
-        from benchmark.trajopt.client import SafeRemoteClient
+        from benchmark.trajopt.client import ExecutionLog, HoldController, SafeRemoteClient
 
         # `attach` 는 이 프로세스가 이미 돌리고 있는 `m`/`d` 를 그대로 가리킨다. 두 번째
         # 시뮬레이션이 아니다 — 두 벌이면 로봇이 있는 곳과 서버가 보는 곳이 갈라진다.
@@ -1173,9 +1196,17 @@ def main():
             active_manipulators=tuple(args.safe_manipulators),
             trace_dir=args.trace,
             shadow=args.safe_shadow,
+            gate=args.safe_gate,
         )
+        hold_ctl = HoldController(mode=args.safe_hold_mode,
+                                  max_hold_chunks=args.safe_max_hold_chunks)
+        # 서버는 자기가 **보낸** 청크만 안다. HOLD 스텝은 청크가 아니라 HOLD 목표(T23: `q_hold`
+        # 고정, `legacy` 면 `rby1_state()`)를 적용하므로, 무엇이 실제로 `d.ctrl` 에 들어갔는지는
+        # 이 루프만 안다 (T18).
+        exec_log = ExecutionLog()
         print(f"[safe] server-side AG3S+TO; cameras={safe_client.cameras} "
-              f"timeout={args.safe_timeout:.1f}s")
+              f"timeout={args.safe_timeout:.1f}s gate={args.safe_gate} "
+              f"hold={args.safe_hold_mode} max_hold_chunks={args.safe_max_hold_chunks}")
         if args.safe_shadow:
             # **어느 모드인지 크게 말한다.** 로그만 보고 이 실행이 로봇을 무엇으로 움직였는지
             # 알 수 있어야 한다 — shadow 와 닫힌 고리의 궤적은 겉보기에 구별되지 않는다.
@@ -1237,7 +1268,11 @@ def main():
                     **({"safe_shadow": True} if args.safe_shadow else {}),
                     "safe_phase": args.safe_phase,
                     "safe_manipulators": list(args.safe_manipulators),
-                    "safe_timeout_s": args.safe_timeout},
+                    "safe_timeout_s": args.safe_timeout,
+                    # T23 — 게이트 · HOLD 방식 · 연속 HOLD 한도.
+                    "safe_gate": args.safe_gate,
+                    "safe_hold_mode": args.safe_hold_mode,
+                    "safe_max_hold_chunks": args.safe_max_hold_chunks},
             # 거리장 설정은 **서버가** 들고 있다. 여기서는 클라이언트가 아는 것만 적고,
             # 서버가 실제로 무엇을 썼는지는 프레임마다 응답의 `field.backend` 가 답한다 —
             # 그쪽이 T0 의 "실제로 사용된 backend provenance" 다.
@@ -1406,6 +1441,24 @@ def main():
                 f"{mcfg['action_format']!r} 은 ({expected},) 를 기대합니다")
         return out
 
+    def applied_ctrl():
+        """이번 스텝에 **실제 `d.ctrl` 에 들어간** 값 — `apply_action` 직후에 부른다 (T18).
+
+        `{"arm": [왼 N, 오른 N], "gripper": [왼, 오른]}`. gripper 는 `ctrl / RBY1_GRIPPER_OPEN`
+        으로 정규화한다 (1 = 열림, `build_obs` 와 같은 방향). HOLD 스텝이면 `rby1_state()` 가
+        적용됐으므로 그 값이 여기 나온다 — 청크가 제안한 값이 아니다.
+
+        rby1 계열 action 만 이 규약을 쓴다. 다른 형식이면 `None` (지어내지 않는다).
+        """
+        if mcfg["action_format"] not in ("rby1", "rby1_16d"):
+            return None
+        n = ARM_JOINT_DIM
+        arm = np.asarray([d.ctrl[a] for a in act["left_a"][:n]]
+                         + [d.ctrl[a] for a in act["right_a"][:n]], dtype=np.float64)
+        grip = np.asarray([d.ctrl[act["left_grip_a"]], d.ctrl[act["right_grip_a"]]],
+                          dtype=np.float64) / RBY1_GRIPPER_OPEN
+        return {"arm": arm, "gripper": grip}
+
     def wait_before_inference():
         """Advance the initial scene in real time before requesting an action."""
         if args.start_delay <= 0:
@@ -1443,6 +1496,8 @@ def main():
         chunk = None
         chunk_step = 0
         previous_physical_chunk = None
+        #: 연속 HOLD 한도를 넘었을 때의 중단 사유 (T23, `HoldController.begin_chunk`). None 이면 계속.
+        hold_abort = None
         # Wall-clock anchor for the next action step; reset after each inference so a
         # slow inference call is not "paid back" by sprinting the following steps.
         next_action_deadline = time.monotonic()
@@ -1469,7 +1524,27 @@ def main():
                     if safe_client is not None:
                         # 서버가 π0.5+SEAM+AG3S+TO 를 다 돌린다. 여기서 받는 것은 청크와
                         # **안전 판정**이고, 실행 여부는 아래에서 로컬이 정한다.
-                        result = safe_client.infer(obs, reset=(t_step == 0))
+                        #
+                        # **직전 청크의 실행 사실을 함께 싣는다** (T18). 몇 스텝이 청크로 실행됐고
+                        # 몇 스텝이 HOLD 였나, `d.ctrl` 에 실제로 들어간 gripper·팔 목표, 그리고
+                        # 지금(= 촬영 시점) 잰 gripper 개도. `build_obs` 와 `_pack` 사이에
+                        # `mj_step` 이 없으므로 여기서 잰 개도가 곧 촬영 시점의 개도다.
+                        if t_step == 0:
+                            exec_log.reset()
+                        _now = rby1_state()
+                        _feedback = exec_log.close(measured_gripper=(
+                            _now[ARM_JOINT_DIM], _now[2 * ARM_JOINT_DIM + 1]))
+                        result = safe_client.infer(obs, reset=(t_step == 0),
+                                                   exec_feedback=_feedback)
+                        exec_log.open_from(safe_client, t_step=t_step)
+                        # **연속 HOLD 청크를 센다** (T23). 한도를 넘으면 아래 기록을 남긴 뒤
+                        # 이번 스텝을 적용하기 전에 멈춘다 — 무한 HOLD 대신 사유 보고.
+                        if t_step == 0:
+                            hold_ctl.reset()
+                        hold_abort = hold_ctl.begin_chunk(
+                            executed=bool(safe_client.should_execute),
+                            reason=safe_client.last_reason,
+                            kinds=safe_client.last_gate.get("hold_kinds") or ())
                     else:
                         result = policy.infer(obs)
                     chunk = np.asarray(result["actions"])
@@ -1559,6 +1634,9 @@ def main():
                                            if safe_client is not None else None),
                         max_violation_pair=(safe_client.last_violation_pair
                                             if safe_client is not None else None),
+                        # **T18 — 이 요청이 서버에 실어 보낸 직전 청크의 실행 사실.**
+                        exec_feedback=(safe_client.last_exec_feedback
+                                       if safe_client is not None else None),
                         # 자유물체까지 포함한 `qpos` 전체와 MuJoCo body 참값. 둘 다 이 분기
                         # 안에서만 계산된다 — 기록하지 않는 실행은 한 번도 물지 않는다.
                         qpos=joint_positions(d),
@@ -1584,7 +1662,15 @@ def main():
                                **({"shadow": True,
                                    "executed_chunk": safe_client.last_executed_chunk}
                                   if safe_client is not None and safe_client.shadow
-                                  else {})})
+                                  else {}),
+                               # T23 — 판정 사유 · 게이트 결정 · 연속 HOLD 수. `--safe-remote`
+                               # 이면 **항상** 둔다 (세로로 셀 때 키가 갈리지 않게).
+                               **({"verdict_reasons": list(safe_client.last_reasons),
+                                   "verdict_reasons_source": safe_client.last_reasons_source,
+                                   "gate": dict(safe_client.last_gate),
+                                   "hold_chunks": int(hold_ctl.consecutive),
+                                   "hold_abort": hold_abort}
+                                  if safe_client is not None else {})})
 
                 if live_pipeline is not None:
                     # closed loop: TO 가 고친 청크를 **실제로 실행한다**. 실패해도 예외를 내지
@@ -1634,18 +1720,34 @@ def main():
                 # sim time is frozen; re-anchor so we resume real-time from here.
                 next_action_deadline = time.monotonic()
 
+            if hold_abort is not None:
+                # **연속 HOLD 한도를 넘었다** (T23, 지침 §8.5). 무한히 HOLD 하는 대신 멈추고 사유를
+                # 보고한다. 이 청크의 planning 기록에 `hold_abort` 가 이미 남았다.
+                print(f"[safe] t={t_step} ABORT — {hold_abort['hold_chunks']} consecutive HOLD "
+                      f"chunks > --safe-max-hold-chunks {hold_abort['limit']}; "
+                      f"kinds={hold_abort['kinds']} — {hold_abort['reason']}")
+                break
             if safe_client is not None and not safe_client.should_execute:
-                # hold: 현재 관절을 그대로 목표로 준다. 정지가 아니라 **유지**다 — 제어를
-                # 끊으면 팔이 중력으로 떨어지고, 그것은 안전 판정이 막으려던 것보다 나쁘다.
-                # 앞 `execution_length` 개만 실행한다는 규칙도 여기서 함께 지켜진다:
-                # 안전하지 않은 청크는 한 스텝도 실행되지 않는다.
+                # hold: 정지가 아니라 **유지**다 — 제어를 끊으면 팔이 중력으로 떨어지고, 그것은
+                # 안전 판정이 막으려던 것보다 나쁘다. 앞 `execution_length` 개만 실행한다는 규칙도
+                # 여기서 함께 지켜진다: 안전하지 않은 청크는 한 스텝도 실행되지 않는다.
                 #
                 # **`should_execute` 를 보는 이유**: shadow 가 아니면 `last_safe` 와 정확히
                 # 같고(기본 동작이 그대로다), shadow 면 unsafe 판정에도 원본 청크가 실행된다.
-                action = rby1_state()
+                #
+                # **T23: 목표는 `q_hold` 고정 + gripper 마지막 명령** (`--safe-hold-mode fixed`).
+                # 예전(`legacy`)에는 매 스텝 `rby1_state()` — 측정 관절과 측정 개도를 다시
+                # 목표로 줘서 닫힘 명령이 사라지고 팔이 흘렀다 (T16, 지침 §8.2). `applied_ctrl()`
+                # 은 이번 `apply_action` **전**의 `d.ctrl` = 직전 스텝의 명령이다.
+                action = hold_ctl.hold_action(last_command=applied_ctrl(),
+                                              measured=rby1_state())
                 if chunk_step == 0:
-                    print(f"[safe] t={t_step} HOLD — {safe_client.last_reason}")
+                    print(f"[safe] t={t_step} HOLD ({hold_ctl.mode}, q_hold from "
+                          f"{hold_ctl.source}, {hold_ctl.consecutive} chunk(s)) — "
+                          f"{safe_client.last_reason}")
             else:
+                if hold_ctl is not None:
+                    hold_ctl.release()
                 if (safe_client is not None and safe_client.shadow and chunk_step == 0
                         and not safe_client.last_safe):
                     # 조용히 넘기지 않는다. shadow 의 목적은 unsafe 프레임을 **보는** 것이다.
@@ -1653,6 +1755,18 @@ def main():
                           f"anyway — {safe_client.last_reason}")
                 action = np.asarray(chunk[chunk_step], dtype=np.float64)
             apply_action(mcfg["action_format"], action, d, idx, act)
+            # **실제로 `d.ctrl` 에 들어간 값** (T18). HOLD 면 청크가 아니라 `rby1_state()` 다.
+            # 청크의 행(`planned_row`)은 HOLD 여도 함께 남긴다 — "제안됐으나 실행 안 됨" 을
+            # 서버가 보려면 제안과 실행이 나란히 있어야 한다.
+            _applied = applied_ctrl()
+            if safe_client is not None:
+                # 대체 청크(`SafeRemoteClient._hold`)의 행 = 마지막 명령 (T23).
+                safe_client.note_command(_applied)
+            if exec_log is not None and _applied is not None:
+                exec_log.step(executed=bool(safe_client.should_execute),
+                              planned_row=chunk[chunk_step],
+                              applied_arm=_applied["arm"],
+                              applied_gripper=_applied["gripper"])
 
             if frame_recorder is not None:
                 # control frame = 개별 제어 스텝. **여기서 `carried`/`stale` 이 생긴다** —
@@ -1668,6 +1782,13 @@ def main():
                     # 못 찾은 것이 이 값이 없었기 때문이다. `apply_action` 직후·`mj_step` 전의
                     # 값이므로 이 action 이 지령된 순간의 자세다.
                     qpos=joint_positions(d),
+                    # T18 — 이 스텝에 실제 `d.ctrl` 에 들어간 팔 목표·gripper.
+                    applied_ctrl=_applied,
+                    # T23 — HOLD 스텝에만: 사유 · q_hold · gripper_hold · 경과 스텝 · q_hold 대비
+                    # 측정 편차. 측정 자세 자체는 같은 줄의 `qpos` 다.
+                    hold=(hold_ctl.record(measured=rby1_state())
+                          if hold_ctl is not None and hold_ctl.holding
+                          and not safe_client.should_execute else None),
                     # **무엇을 실행했는지**는 shadow 에서만 애매하다 (판정이 unsafe 인데
                     # 움직였다). 그래서 shadow 일 때만 키를 더한다 — T0 기록의 키 집합을
                     # 그대로 두면서, 있으면 그 자체로 "이 실행은 shadow" 라는 표시가 된다.
@@ -1750,6 +1871,8 @@ def main():
                 print(f"    {k}: {v}")
         if safe_client is not None:
             safe_client.close()
+        if hold_ctl is not None:
+            print(f"[safe] HOLD ({hold_ctl.mode}): {hold_ctl.stats}")
         if live_pipeline is not None:
             live_pipeline.close()
         if ag3s_recorder is not None:
