@@ -721,12 +721,16 @@ def main():
     ap.add_argument("--safe-timeout", type=float, default=2.0, metavar="SEC",
                     help="서버 응답 제한 시간. 넘으면 hold")
     # T23 — 실행 게이트와 HOLD. 세 flag 모두 기본값이 새 동작이고, `legacy` 가 T23 전 동작이다.
-    ap.add_argument("--safe-gate", choices=("reasons", "legacy"), default="reasons",
+    ap.add_argument("--safe-gate", choices=("reasons", "legacy", "off"), default="reasons",
                     help="실행 게이트 (T23). reasons(기본): 서버 safe 와 verdict_reasons 의 처리가 "
                          "둘 다 실행일 때만 실행 — 권한 link↔조작 대상 접촉(allowed_contact)·가려진 "
                          "target(occluded_target)·예산 종료(budget_only)는 실행, collision·"
                          "uncertified·unverified·통신 실패는 HOLD. legacy: T23 전 판정 "
-                         "(trajopt_status 가 optimal/feasible 일 때만)")
+                         "(trajopt_status 가 optimal/feasible 일 때만). off (T27, 사다리 실험): "
+                         "판정은 기록만 하고 도착한 청크는 언제나 refined 를 실행한다 — HOLD 는 "
+                         "청크가 도착하지 않은 경우(comms)뿐이고 크게 찍힌다. planning 기록의 "
+                         "gate.would_hold 가 게이트가 켜져 있었다면의 결정이다. --safe-shadow 와 "
+                         "같이 쓸 수 없다 (shadow 는 reference 를 실행한다)")
     ap.add_argument("--safe-hold-mode", choices=("fixed", "legacy"), default="fixed",
                     help="HOLD 동안의 목표 (T23). fixed(기본): HOLD 에 들어갈 때 직전 스텝에 "
                          "명령한 팔 목표(d.ctrl)를 q_hold 로 한 번 잡아 유지하고, gripper 는 마지막 "
@@ -937,6 +941,11 @@ def main():
         ap.error("--safe-max-hold-chunks only does something together with --safe-remote")
     if args.safe_max_hold_chunks is not None and args.safe_max_hold_chunks < 0:
         ap.error(f"--safe-max-hold-chunks must be >= 0, got {args.safe_max_hold_chunks}")
+    if args.safe_gate == "off" and not args.safe_remote:
+        ap.error("--safe-gate off only does something together with --safe-remote")
+    if args.safe_gate == "off" and args.safe_shadow:
+        ap.error("--safe-gate off executes the REFINED chunk; --safe-shadow executes the policy "
+                 "REFERENCE chunk. They are different experiments — pick one")
     if args.safe_shadow and not args.safe_remote:
         ap.error("--safe-shadow requires --safe-remote: shadow means the server runs the whole "
                  "pipeline and the robot executes the policy's own chunk. Without the server "
@@ -1183,7 +1192,8 @@ def main():
             sys.path.insert(0, str(workspace_root))
         from benchmark.ag3s.experiments.sources.mujoco_source import TransportScene
         from benchmark.trajopt import wire
-        from benchmark.trajopt.client import ExecutionLog, HoldController, SafeRemoteClient
+        from benchmark.trajopt.client import (ExecutionLog, HoldController, SafeRemoteClient,
+                                              gate_banner)
 
         # `attach` 는 이 프로세스가 이미 돌리고 있는 `m`/`d` 를 그대로 가리킨다. 두 번째
         # 시뮬레이션이 아니다 — 두 벌이면 로봇이 있는 곳과 서버가 보는 곳이 갈라진다.
@@ -1207,6 +1217,10 @@ def main():
         print(f"[safe] server-side AG3S+TO; cameras={safe_client.cameras} "
               f"timeout={args.safe_timeout:.1f}s gate={args.safe_gate} "
               f"hold={args.safe_hold_mode} max_hold_chunks={args.safe_max_hold_chunks}")
+        if gate_banner(args.safe_gate):
+            # T27 — **게이트가 꺼져 있으면 크게 말한다.** 로그만 보고 이 실행이 판정으로 멈출 수
+            # 있었는지 알 수 있어야 한다.
+            print(gate_banner(args.safe_gate))
         if args.safe_shadow:
             # **어느 모드인지 크게 말한다.** 로그만 보고 이 실행이 로봇을 무엇으로 움직였는지
             # 알 수 있어야 한다 — shadow 와 닫힌 고리의 궤적은 겉보기에 구별되지 않는다.
@@ -1308,6 +1322,12 @@ def main():
             expected_observation_frames=n_policy_calls)
         print(f"[frames] manifest + frames.jsonl -> {args.record_frames}")
 
+    #: 시뮬레이션이 **이번 관측을 위해 멈춘 순간** (`time.monotonic()`, T30c). 제어 루프가
+    #: `build_obs` 직전에 채운다. 그 뒤로 청크의 첫 스텝을 적용하기 전까지 `mj_step` 이 없으므로,
+    #: 정책 이미지 · AG3S depth · `robot_state` · 외부 파라미터가 모두 이 한 순간의 씬이다.
+    #: osmesa 가 카메라를 차례로 렌더하는 시간(head ↔ wrist 102–142 ms)은 씬의 시차가 아니다.
+    sim_clock = {"frozen_at": None}
+
     live_pipeline = None
     if args.trajopt:
         # 벤치마크 패키지는 src/ 한 단계 위에 있다 (`--record-ag3s` 와 같은 규칙).
@@ -1350,6 +1370,11 @@ def main():
 
         def _capture():
             out = []
+            # T30c — 세 카메라에 **한 순간**. 루프가 채운 정지 순간이 없으면(루프 밖 호출) 지금
+            # 한 번 잰다 — 이 함수도 `mj_step` 없이 `m`/`d` 를 읽기만 한다.
+            frozen_at = sim_clock["frozen_at"]
+            if frozen_at is None:
+                frozen_at = time.monotonic()
             for camera in ag3s_cameras:
                 amap = policy_attention.get(camera)
                 if amap is None and not attention_state["warned"]:
@@ -1358,7 +1383,7 @@ def main():
                           "반환하도록 고치면 사라진다")
                     attention_state["warned"] = True
                 observation, _frame = camera_observation(
-                    ag3s_scene, camera, ag3s_robot, timestamp=time.monotonic(),
+                    ag3s_scene, camera, ag3s_robot, timestamp=frozen_at,
                     attention_map=amap,
                 )
                 out.append(observation)
@@ -1503,6 +1528,10 @@ def main():
         next_action_deadline = time.monotonic()
         for t_step in range(0, args.max_steps if args.max_steps > 0 else 10**9):
             if chunk is None or chunk_step >= OPEN_LOOP_HORIZON:
+                # T30c — **시뮬레이션이 이 관측을 위해 멈춘 순간.** 직전 `mj_step` 은 지난 스텝의
+                # 끝이고, 다음 `mj_step` 은 이 청크의 첫 스텝 뒤다. 그 사이의 렌더(정책 RGB 셋 ·
+                # AG3S depth 셋)는 모두 이 순간의 씬을 찍는다 — 촬영 시각은 이것 하나다.
+                sim_clock["frozen_at"] = time.monotonic()
                 obs = build_obs(mcfg["obs_format"], m, d, renderer_pol, idx, args.prompt)
                 if mcfg["obs_format"] == "rby1":
                     validate_rby1_observation(obs, log=(t_step == 0))
@@ -1534,8 +1563,11 @@ def main():
                         _now = rby1_state()
                         _feedback = exec_log.close(measured_gripper=(
                             _now[ARM_JOINT_DIM], _now[2 * ARM_JOINT_DIM + 1]))
+                        # T30c — 세 카메라 · 자세 · 외부 파라미터에 **정지 순간 하나**를 싣는다.
+                        # 렌더 벽시계는 `safe_client.last_render_stamps` 에 따로 남는다 (진단용).
                         result = safe_client.infer(obs, reset=(t_step == 0),
-                                                   exec_feedback=_feedback)
+                                                   exec_feedback=_feedback,
+                                                   capture_time=sim_clock["frozen_at"])
                         exec_log.open_from(safe_client, t_step=t_step)
                         # **연속 HOLD 청크를 센다** (T23). 한도를 넘으면 아래 기록을 남긴 뒤
                         # 이번 스텝을 적용하기 전에 멈춘다 — 무한 HOLD 대신 사유 보고.
@@ -1583,6 +1615,11 @@ def main():
                     _reasons = list(_ag3s.get("reasons") or ())
                     frame_recorder.observation(
                         t_step=t_step, stamps=_obs_stamps,
+                        # T30c — 순차 렌더의 벽시계 (진단용). `_obs_stamps` 는 정지 순간 하나.
+                        render_stamps=(dict(safe_client.last_render_stamps)
+                                       if safe_client is not None else None),
+                        stamp_mode=(safe_client.last_stamp_mode
+                                    if safe_client is not None else None),
                         ag3s_status=_obs_status,
                         grounding_status=str(_ag3s.get("grounding_status")
                                              or "unavailable-on-client"),
