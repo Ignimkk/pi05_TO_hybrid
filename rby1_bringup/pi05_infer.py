@@ -141,6 +141,32 @@ RANDOMIZED_16D_DATASET = pathlib.Path(
 CTRL_HZ = 15
 OPEN_LOOP_HORIZON = 8
 POLICY_CAMERA_NAMES = ("cam_high", "cam_left_wrist", "cam_right_wrist")
+#: 정책 RNG seed 의 상한 (배타). `benchmark.trajopt.wire.POLICY_SEED_LIMIT` 와 같은 값 — 이 파일은 로컬
+#: PC 에서 benchmark 없이도 돌아야 하므로 import 하지 않고 적는다 (T39).
+POLICY_SEED_LIMIT = 2 ** 32
+#: E0 (`--remote`, `--safe-remote` 없음) 요청의 seed 키. 서버의 `SeededPolicy` 가 벗겨 소비한다 (T39).
+POLICY_SEED_KEY = "policy_seed"
+
+
+def run_warmup_steps(n_steps, step, *, is_running=None, sync=None):
+    """`--warmup-steps` (T39): 첫 추론 전에 시뮬레이션을 **정확히** `n_steps` 번 진행한다.
+
+    `--start-delay` 는 벽시계로 진행해서 run 마다 step 수가 미세하게 달랐다 (T28 E0 ep1807 r1 vs r2 의
+    t=0 qpos 차 5.3e-4). 같은 `(episode, seed)` 가 같은 t=0 상태가 되려면 step 수가 고정이어야 한다.
+    벽시계를 보지 않고, 잠들지 않는다. `step()` 이 `mujoco.mj_step(m, d)` 이다.
+
+    `is_running` 이 False 를 내면 (viewer 를 닫음) 거기서 멈추고 `None` 을, 아니면 돈 step 수를 돌려준다.
+    """
+    n_steps = int(n_steps)
+    if n_steps < 0:
+        raise ValueError(f"warmup steps must be >= 0, got {n_steps}")
+    for i in range(n_steps):
+        if is_running is not None and not is_running():
+            return None
+        step()
+        if sync is not None:
+            sync()
+    return n_steps
 
 
 def configure_view_camera(camera, view):
@@ -782,6 +808,16 @@ def main():
     ap.add_argument("--start-delay", type=float, default=2.0,
                     help="seconds to run the simulator and show the viewer before the first "
                          "policy inference request (default: 2.0; use 0 to disable)")
+    ap.add_argument("--warmup-steps", type=int, default=None, metavar="N",
+                    help="(T39) 첫 추론 전에 시뮬레이션을 **정확히 N step** 진행한다 — --start-delay 의 "
+                         "벽시계 진행을 대신한다 (같은 episode 는 같은 t=0 상태). --start-delay 2.0 의 "
+                         "등가는 round(2.0 / timestep) = 1000 (timestep 0.002). 주지 않으면 예전 그대로")
+    ap.add_argument("--policy-seed", type=int, default=None, metavar="INT",
+                    help="(T39) 정책 RNG seed. 에피소드 첫 요청에만 실어 보내고, 서버는 그 요청의 "
+                         "policy.infer 직전에 정책 RNG 를 jax.random.key(INT) 로 다시 놓는다 — "
+                         "(episode, seed) 가 noise 를 정한다. --remote 필요 (--safe-remote · E0 둘 다). "
+                         "서버가 회신하지 않으면 (옛 서버) 즉시 죽는다. 주지 않으면 예전 그대로 "
+                         "(noise = 서버 요청 순서)")
     ap.add_argument("--speed", type=float, default=0,
                     help="playback speed relative to real time: 1.0 paces the sim to wall "
                          "clock (physics run ~17x faster than real time otherwise), 0.5 is "
@@ -844,6 +880,10 @@ def main():
 
     if args.start_delay < 0:
         ap.error("--start-delay must be non-negative")
+    if args.warmup_steps is not None and args.warmup_steps < 0:
+        ap.error(f"--warmup-steps must be >= 0, got {args.warmup_steps}")
+    if args.policy_seed is not None and not 0 <= args.policy_seed < POLICY_SEED_LIMIT:
+        ap.error(f"--policy-seed must be in [0, 2**32), got {args.policy_seed}")
     if args.speed < 0:
         ap.error("--speed must be non-negative (0 = unlimited)")
     if args.obstacle_stop_distance < 0:
@@ -935,6 +975,10 @@ def main():
         ap.error("--record-depth only does something together with --record-ag3s")
     if args.safe_remote and not args.remote:
         ap.error("--safe-remote requires --remote (the safety layer runs on the server)")
+    if args.policy_seed is not None and not args.remote:
+        ap.error("--policy-seed requires --remote (the server owns the policy RNG; T39)")
+    if args.policy_seed is not None and args.seam:
+        ap.error("--policy-seed is not wired through SEAM (serve_seam_policy does not apply it)")
     if args.safe_remote and args.trajopt:
         ap.error("--safe-remote and --trajopt are two places to run the same layer; pick one")
     if args.safe_max_hold_chunks is not None and not args.safe_remote:
@@ -1297,7 +1341,10 @@ def main():
                     "sim_steps_per_action": steps_per_action,
                     "speed": args.speed,
                     # 한도는 서버 설정이다. 클라이언트가 모르면 stale 판정을 못 한다.
-                    "max_field_age_sec": None},
+                    "max_field_age_sec": None,
+                    # T39 — 첫 추론 전 진행. warmup_steps 가 null 이면 벽시계 start_delay_s 다.
+                    "start_delay_s": args.start_delay,
+                    "warmup_steps": args.warmup_steps},
             cameras=tuple(args.trajopt_cameras or ("zed_left", "wrist_cam_l",
                                                    "wrist_cam_r")),
             render={"third_person_video": args.record,
@@ -1309,6 +1356,8 @@ def main():
                    # "재려고 했는데 없었다" 는 다른 사실이다.
                    "object_truth": scene_truth.describe()},
         )
+        # T39 — 정책 RNG seed. null 이면 noise 가 서버 요청 순서로 정해진 run 이다.
+        manifest["policy_seed"] = args.policy_seed
         # 관측 프레임은 **정책 호출당 한 번**이다 — 제어 스텝당 한 번이 아니다. 카메라
         # 캡처와 AG3S 한 바퀴는 아래 `chunk_step >= OPEN_LOOP_HORIZON` 분기 안에서만
         # 일어나고, 그 사이 7 스텝은 이미 받은 청크를 그대로 흘려보낸다. 처음에는 이
@@ -1486,6 +1535,19 @@ def main():
 
     def wait_before_inference():
         """Advance the initial scene in real time before requesting an action."""
+        if args.warmup_steps is not None:
+            # T39 — 고정 step 수. 벽시계를 보지 않는다 (--start-delay 무시).
+            print(f"[warmup] {args.warmup_steps} fixed sim steps "
+                  f"(= {args.warmup_steps * m.opt.timestep:.3f} s sim time) before inference; "
+                  "--start-delay ignored")
+            done = run_warmup_steps(
+                args.warmup_steps, lambda: mujoco.mj_step(m, d),
+                is_running=(ctx.is_running if ctx is not None else None),
+                sync=(ctx.sync if ctx is not None else None))
+            if done is None:
+                return False
+            print("Starting policy inference.")
+            return True
         if args.start_delay <= 0:
             return True
 
@@ -1567,7 +1629,14 @@ def main():
                         # 렌더 벽시계는 `safe_client.last_render_stamps` 에 따로 남는다 (진단용).
                         result = safe_client.infer(obs, reset=(t_step == 0),
                                                    exec_feedback=_feedback,
-                                                   capture_time=sim_clock["frozen_at"])
+                                                   capture_time=sim_clock["frozen_at"],
+                                                   # T39 — 에피소드 첫 요청에만.
+                                                   policy_seed=(args.policy_seed
+                                                                if t_step == 0 else None))
+                        if t_step == 0 and args.policy_seed is not None:
+                            # 회신이 틀리면 `safe_client` 가 이미 죽었다 (`_check_policy_seed_echo`).
+                            print(f"[policy_seed] sent policy_seed={args.policy_seed} with the "
+                                  f"first request (ipc={safe_client.last_ipc})")
                         exec_log.open_from(safe_client, t_step=t_step)
                         # **연속 HOLD 청크를 센다** (T23). 한도를 넘으면 아래 기록을 남긴 뒤
                         # 이번 스텝을 적용하기 전에 멈춘다 — 무한 HOLD 대신 사유 보고.
@@ -1577,6 +1646,18 @@ def main():
                             executed=bool(safe_client.should_execute),
                             reason=safe_client.last_reason,
                             kinds=safe_client.last_gate.get("hold_kinds") or ())
+                    elif args.policy_seed is not None and t_step == 0:
+                        # T39 — E0: 맨 키로 싣는다 (사본에 — `obs` 는 기록에도 쓰인다). 서버의
+                        # `SeededPolicy` 가 벗겨 소비하고 회신한다. 회신이 없으면 옛 서버다.
+                        result = policy.infer({**obs, POLICY_SEED_KEY: int(args.policy_seed)})
+                        if result.get(POLICY_SEED_KEY) != args.policy_seed:
+                            raise SystemExit(
+                                f"[policy_seed] sent {args.policy_seed} but the server replied "
+                                f"{result.get(POLICY_SEED_KEY)!r} — it does not apply policy seeds "
+                                "(pre-T39 serve_safe?). This run would NOT be determined by "
+                                "(episode, seed); restart the server from T39 code")
+                        print(f"[policy_seed] server applied policy_seed={args.policy_seed} "
+                              "before the first request")
                     else:
                         result = policy.infer(obs)
                     chunk = np.asarray(result["actions"])
@@ -1951,6 +2032,11 @@ def main():
                 ),
                 control_hz=np.asarray(CTRL_HZ, dtype=np.int64),
                 execution_length=np.asarray(OPEN_LOOP_HORIZON, dtype=np.int64),
+                # T39 — 준 경우에만 (옛 파일과 키 집합을 같게 둔다).
+                **({"policy_seed": np.asarray(args.policy_seed, dtype=np.int64)}
+                   if args.policy_seed is not None else {}),
+                **({"warmup_steps": np.asarray(args.warmup_steps, dtype=np.int64)}
+                   if args.warmup_steps is not None else {}),
             )
             print(f"saving trajectory ({len(executed_actions)} executed steps) -> {trajectory_path}")
 
